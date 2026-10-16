@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>pipeline probe</title>
+<style>html,body{margin:0;overflow:hidden;background:#000}canvas{display:block}</style></head>
+<body>
+<script type="importmap">
+{ "imports": { "three": "../libs/three.module.js", "three/addons/": "../libs/" } }
+</script>
+<script type="module">
+/* 最小复现：和应用完全相同的渲染管线（WebGLRenderer + EffectComposer + RenderPass + OutputPass），
+   画一个 gl_FragColor = vec4(0.5, 0.5, 0.5, 1.0) 的全屏面。
+   若读回 ≈128 → 管线不做额外编码（0.5 线性 → sRGB 编码后应为 188，这里若得 188 即说明
+   "着色器输出的值被当作线性色再编码了一次"）。 */
+import * as THREE from 'three';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+renderer.setPixelRatio(1);
+renderer.setSize(200, 200);
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+const mat = new THREE.ShaderMaterial({
+  vertexShader: 'void main(){ gl_Position = vec4(position.xy, 0.0, 1.0); }',
+  fragmentShader: 'void main(){ gl_FragColor = vec4(0.5, 0.5, 0.5, 1.0); }',
+});
+const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), mat);
+scene.add(quad);
+
+const composer = new EffectComposer(renderer);
+composer.addPass(new RenderPass(scene, camera));
+composer.addPass(new OutputPass());
+
+window.__PROBE = () => {
+  const out = {};
+  /* 1) 直出到画布 */
+  renderer.setRenderTarget(null);
+  renderer.render(scene, camera);
+  let px = new Uint8Array(4);
+  renderer.getContext().readPixels(100, 100, 1, 1, renderer.getContext().RGBA, renderer.getContext().UNSIGNED_BYTE, px);
+  out.direct = [px[0], px[1], px[2], px[3]];
+  /* 2) 走 composer（应用的实际路径） */
+  composer.render();
+  px = new Uint8Array(4);
+  renderer.getContext().readPixels(100, 100, 1, 1, renderer.getContext().RGBA, renderer.getContext().UNSIGNED_BYTE, px);
+  out.composer = [px[0], px[1], px[2], px[3]];
+  out.outputColorSpace = renderer.outputColorSpace;
+  out.toneMapping = renderer.toneMapping;
+  return out;
+};
+window.__READY = true;
+</script>
+</body></html>

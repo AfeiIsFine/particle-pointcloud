@@ -1,0 +1,3146 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="icon" href="favicon.ico">
+<title>图片转粒子点云效果</title>
+<style>
+  /* ============ 设计系统：单色阶（黑 / 白 / 灰），无彩色 ============
+     选中态与主按钮 = 单色玻璃（半透明白纵向渐变 + 上沿高光 + 轻微投影），其上文字纯白。
+     滑块填充 = 实色 --hi（数值指示要一眼看清，不做玻璃）。
+     层级靠明度（--ink → --ink-3）与 1px 细线（--line）建立，不靠颜色。
+     注意 --ink（文字）与 --hi（高亮面）分开：高亮面可以调暗，文字必须保持高对比。 */
+  :root {
+    color-scheme: dark;
+    --ink:    #f5f5f5;              /* 主文字（高对比，不随高亮面一起调暗） */
+    --hi:     #bcbcbc;              /* 滑块已填充段 / 手柄：实色（数值指示需要最清晰） */
+    /* 选中态与主按钮用的"单色玻璃"：三层半透明白，靠不透明度而非实色堆出体积 */
+    --glass-1: rgba(255,255,255,.28);  /* 玻璃上沿（受光面）→ 合成后 ≈ #515151 */
+    --glass-2: rgba(255,255,255,.16);  /* 玻璃中部 → ≈ #343434 */
+    --glass-3: rgba(255,255,255,.085); /* 玻璃下沿 → ≈ #222（几乎融进面板底色） */
+    --ink-2:  #9c9c9c;              /* 标签、次级文字 */
+    --ink-3:  #626262;              /* 说明文字、非激活图标 */
+    --ink-4:  #2e2e2e;              /* 滑轨已填充之外的部分 */
+    --line:   rgba(255,255,255,.10);/* 细分隔线 */
+    --line-2: rgba(255,255,255,.20);/* 控件描边 */
+    --panel:  rgba(10,10,10,.90);
+    --field:  #191919;              /* 输入框 / 分段控件底 */
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    width: 100%; height: 100%; overflow: hidden; background: #000; color: var(--ink);
+    font: 12px/1.5 -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  #app { position: fixed; inset: 0; }
+  button { font: inherit; color: inherit; background: none; border: 0; cursor: pointer; }
+  button:focus-visible, summary:focus-visible, input:focus-visible, select:focus-visible {
+    outline: 1px solid var(--ink); outline-offset: 2px;
+  }
+  /* 滑块不画整条描边，改在滑块手柄上加光圈——更贴近实际聚焦对象 */
+  input[type=range]:focus-visible { outline: none; }
+  input[type=range]:focus-visible::-webkit-slider-thumb { box-shadow: 0 0 0 3px rgba(255,255,255,.28); }
+  input[type=range]:focus-visible::-moz-range-thumb { box-shadow: 0 0 0 3px rgba(255,255,255,.28); }
+
+  /* ---- 拖拽上传区 ---- */
+  #dropzone {
+    position: fixed; inset: 0; z-index: 10;
+    display: flex; align-items: center; justify-content: center;
+    background: #000; cursor: pointer; transition: background .25s;
+  }
+  #dropzone.hidden { display: none; }
+  #dropzone .dz-card {
+    display: flex; flex-direction: column; align-items: center; gap: 8px;
+    padding: 42px 60px; border: 1px dashed var(--line-2); border-radius: 14px; transition: .25s;
+  }
+  #dropzone.drag .dz-card { border-style: solid; border-color: var(--hi); background: rgba(255,255,255,.04); }
+  #dropzone .dz-mark {
+    width: 34px; height: 34px; margin-bottom: 6px; border: 1px solid var(--line-2); border-radius: 9px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 17px; font-weight: 300; color: var(--ink-2); line-height: 1; transition: .25s;
+  }
+  #dropzone.drag .dz-mark { border-color: var(--hi); color: var(--hi); }
+  #dropzone .dz-title { font-size: 15px; letter-spacing: .02em; }
+  #dropzone .dz-hint { font-size: 11px; color: var(--ink-3); letter-spacing: .02em; }
+
+  /* ---- 控制面板（左：静态设定 / 右：动态与输出）---- */
+  .panel {
+    position: fixed; top: 14px; z-index: 20; width: 272px;
+    max-height: calc(100vh - 28px); overflow-y: auto; overscroll-behavior: contain;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+    backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+    box-shadow: 0 18px 50px rgba(0,0,0,.55);
+    transition: opacity .2s ease, transform .25s ease, visibility 0s;
+  }
+  .panel-left  { left: 14px; }
+  .panel-right { right: 14px; }
+  /* visibility 必须跟着一起改：只改 opacity 的话元素仍留在 Tab 顺序与无障碍树里，
+     键盘会把焦点一路走到看不见的控件上（实测收起后有 13 个不可见控件能被 Tab 到）。
+     过渡里给 visibility 加 .25s 延迟，保证淡出动画先播完再真正隐藏。 */
+  .panel.hidden {
+    opacity: 0; pointer-events: none; visibility: hidden;
+    transition: opacity .2s ease, transform .25s ease, visibility 0s linear .25s;
+  }
+  #panelL.hidden { transform: translateX(-10px); }
+  #panel.hidden  { transform: translateX(10px); }
+  .panel::-webkit-scrollbar { width: 9px; }
+  .panel::-webkit-scrollbar-track { background: transparent; }
+  .panel::-webkit-scrollbar-thumb {
+    background: rgba(255,255,255,.16); border-radius: 5px;
+    border: 3px solid transparent; background-clip: content-box;
+  }
+  .panel::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,.3); background-clip: content-box; }
+  /* 右栏没有标题栏，第一组直接贴顶：去掉多余的上内边距 */
+  .panel-right > .group:first-child { margin-top: 10px; }
+
+  .p-head {
+    position: sticky; top: 0; z-index: 2;
+    display: flex; align-items: flex-start; justify-content: space-between; gap: 10px;
+    padding: 13px 14px 11px; border-bottom: 1px solid var(--line);
+    background: var(--panel); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+  }
+  .p-head .head-actions { display: flex; flex: none; align-items: center; gap: 8px; }
+  .p-head h1 { font-size: 13px; font-weight: 600; letter-spacing: .05em; }
+  .p-head .p-sub { margin-top: 2px; font-size: 10px; color: var(--ink-3); letter-spacing: .06em; }
+  /* 语言开关：与其它分段控件同形态，只是更窄 */
+  .lang-seg { flex: none; width: 58px; }
+  .lang-seg > button { padding: 3px 0; font-size: 10px; letter-spacing: .02em; }
+  .icon-btn {
+    flex: none; width: 24px; height: 24px; border: 1px solid var(--line); border-radius: 6px;
+    color: var(--ink-2); font-size: 12px; line-height: 1;
+    display: flex; align-items: center; justify-content: center; transition: .15s;
+  }
+  .icon-btn:hover { border-color: var(--line-2); color: var(--ink); background: rgba(255,255,255,.07); }
+
+  /* ---- 分组（details）：同类功能收在一组 ---- */
+  .group { border-bottom: 1px solid var(--line); }
+  .group:last-child { border-bottom: 0; }
+  .group > summary {
+    list-style: none; cursor: pointer; user-select: none;
+    display: flex; align-items: center; gap: 9px; padding: 9px 14px;
+    color: var(--ink-2); transition: color .15s;
+  }
+  .group > summary::-webkit-details-marker { display: none; }
+  .group > summary:hover { color: var(--ink); }
+  .group[open] > summary { color: var(--ink); }
+  .g-no { font-size: 10px; color: var(--ink-3); letter-spacing: .06em; font-variant-numeric: tabular-nums; }
+  .g-name { flex: 1; font-size: 11.5px; letter-spacing: .08em; }
+  .g-chev {
+    width: 6px; height: 6px; margin: -3px 3px 0 0; opacity: .65;
+    border-right: 1px solid currentColor; border-bottom: 1px solid currentColor;
+    transform: rotate(45deg); transition: transform .2s ease;
+  }
+  .group[open] .g-chev { transform: rotate(-135deg); margin-top: 3px; }
+  .g-body { display: flex; flex-direction: column; gap: 9px; padding: 1px 14px 13px; }
+  .divider { height: 1px; background: var(--line); margin: 2px 0 0; }
+  .sub-label { font-size: 10px; color: var(--ink-3); letter-spacing: .08em; }
+  .sub-row { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+  .sub-tag { font-size: 10px; color: var(--ink-3); }
+  /* 仅对序列有意义的设置：单帧模式下整块变灰、不可操作（disabled 由 JS 设） */
+  #panel.export-still .seq-only { opacity: .3; }
+  .still-off { display: none; }
+  #panel.export-still .still-off { display: inline; }
+  .seg.locked { pointer-events: none; }
+  .seg > button:disabled { cursor: not-allowed; }
+
+  /* ---- 控制行 ---- */
+  .ctl { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+  .ctl-head { display: flex; align-items: baseline; justify-content: flex-start; gap: 8px; }
+  .ctl-head .k { font-size: 11px; color: var(--ink-2); letter-spacing: .02em; }
+  .ctl-head .k2 { font-size: 10px; color: var(--ink-3); }
+  .ctl-head .v { margin-left: auto; font-size: 11px; color: var(--ink); font-variant-numeric: tabular-nums; }
+  /* 重置按钮：紧贴参数名，平时几乎看不见、悬停才显形；已在默认值上时更淡且不可点 */
+  .ctl-head .rv {
+    align-self: center; flex: none; margin-left: -5px;
+    width: 15px; height: 15px; padding: 0;
+    display: inline-flex; align-items: center; justify-content: center;
+    border: 1px solid transparent; border-radius: 50%; background: none;
+    color: var(--ink-3); font-size: 10px; line-height: 1; cursor: pointer;
+    opacity: .4; transition: opacity .18s ease, color .18s ease, border-color .18s ease;
+  }
+  .ctl-head .rv:hover { opacity: 1; color: var(--ink); border-color: var(--line-2); }
+  .ctl-head .rv.at-default { opacity: .12; pointer-events: none; }
+  .note { font-size: 10.5px; color: var(--ink-3); line-height: 1.55; }
+  .media-off { display: none; }
+  #panel.media-mode .media-off { display: block; }
+  .row2 { display: flex; align-items: flex-end; gap: 8px; }
+  .range-pair { display: flex; align-items: center; gap: 8px; }
+  .range-pair .arrow { flex: none; font-size: 10px; color: var(--ink-3); }
+
+  /* ---- 滑块：白色已填充轨道 = 唯一强调 ---- */
+  input[type=range] {
+    -webkit-appearance: none; appearance: none;
+    display: block; width: 100%; height: 10px; background: none; cursor: ew-resize;
+  }
+  input[type=range]::-webkit-slider-runnable-track {
+    height: 2px; border-radius: 1px;
+    background: linear-gradient(to right,
+      var(--hi) 0, var(--hi) var(--fill, 50%), var(--ink-4) var(--fill, 50%), var(--ink-4) 100%);
+  }
+  input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none; width: 10px; height: 10px; margin-top: -4px;
+    border: 0; border-radius: 50%; background: var(--hi); transition: transform .12s ease;
+  }
+  input[type=range]:hover::-webkit-slider-thumb { transform: scale(1.2); }
+  input[type=range]:active::-webkit-slider-thumb { transform: scale(1.35); }
+  input[type=range]::-moz-range-track { height: 2px; border-radius: 1px; background: var(--ink-4); }
+  input[type=range]::-moz-range-progress { height: 2px; border-radius: 1px; background: var(--hi); }
+  input[type=range]::-moz-range-thumb { width: 10px; height: 10px; border: 0; border-radius: 50%; background: var(--hi); }
+  input[type=range]:disabled { opacity: .3; cursor: not-allowed; }
+  input[type=range]:disabled::-webkit-slider-thumb { transform: none; }
+
+  /* ---- 数字输入 ---- */
+  input[type=number] {
+    width: 100%; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px;
+    background: var(--field); color: var(--ink); font: inherit; font-size: 11px;
+    text-align: center; font-variant-numeric: tabular-nums; -moz-appearance: textfield;
+  }
+  input[type=color] {
+    -webkit-appearance: none; appearance: none;
+    width: 100%; height: 30px; padding: 2px; border: 1px solid var(--line); border-radius: 6px;
+    background: var(--field); cursor: pointer;
+  }
+  input[type=color]::-webkit-color-swatch-wrapper { padding: 0; }
+  input[type=color]::-webkit-color-swatch { border: none; border-radius: 4px; }
+
+  input[type=number]::-webkit-inner-spin-button,
+  input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+  input[type=number]:focus { border-color: var(--line-2); }
+  input[type=number]:disabled { opacity: .35; }
+
+  /* ---- 下拉（仅在选项多时使用）---- */
+  select {
+    -webkit-appearance: none; appearance: none;
+    width: 100%; padding: 6px 26px 6px 9px; border: 1px solid var(--line); border-radius: 6px;
+    background: var(--field) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='9' height='9' viewBox='0 0 9 9'%3E%3Cpath d='M1.5 3.5 4.5 6.5 7.5 3.5' fill='none' stroke='%239c9c9c' stroke-width='1.1' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") no-repeat right 9px center;
+    color: var(--ink); font: inherit; font-size: 11px;
+  }
+  select:hover { border-color: var(--line-2); }
+
+  /* ---- 分段控件：2~3 个互斥选项，替代下拉，统一形态 ---- */
+  .seg { display: flex; gap: 2px; padding: 2px; border: 1px solid var(--line); border-radius: 7px; background: var(--field); }
+  .seg > button {
+    flex: 1; min-width: 0; padding: 4px 2px; border-radius: 5px;
+    font-size: 11px; color: var(--ink-2); white-space: nowrap; transition: .15s;
+  }
+  .seg > button:hover { color: var(--ink); }
+
+  /* ---- 按钮 ---- */
+  .btn {
+    width: 100%; padding: 7px 10px; border: 1px solid var(--line-2); border-radius: 7px;
+    color: var(--ink); font-size: 11.5px; letter-spacing: .04em;
+    display: flex; align-items: center; justify-content: center; gap: 7px; transition: .15s;
+  }
+  .btn:hover { background: rgba(255,255,255,.08); }
+  .btn:active { background: rgba(255,255,255,.14); }
+  .btn:disabled { opacity: .3; cursor: not-allowed; }
+  .btn:disabled:hover { background: none; }
+
+  /* ---- 导出进行中：屏幕上方常驻提示条（导出可能连跑几分钟，
+     面板收起 / 参数滚出视野时也必须能看到"正在渲染第几帧"并能中止）---- */
+  #recBar {
+    position: fixed; left: 50%; top: 16px; transform: translate(-50%, -30px); z-index: 30;
+    display: flex; align-items: center; gap: 10px; padding: 7px 10px 7px 14px; border-radius: 999px;
+    background: var(--panel); border: 1px solid var(--line-2);
+    backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+    box-shadow: 0 12px 34px rgba(0,0,0,.6);
+    opacity: 0; pointer-events: none;
+    transition: opacity .3s cubic-bezier(.32,.72,0,1), transform .3s cubic-bezier(.32,.72,0,1);
+  }
+  #recBar.on { opacity: 1; pointer-events: auto; transform: translate(-50%, 0); }
+  #recBar .dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: #e05252; animation: rec-blip 1.1s infinite; }
+  @keyframes rec-blip { 0%, 100% { opacity: 1; } 50% { opacity: .25; } }
+  #recBar .txt {
+    font: 10.5px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+    letter-spacing: .05em; color: var(--ink-2); font-variant-numeric: tabular-nums; white-space: nowrap;
+  }
+  /* 不加 .btn（那个 class 是 width:100% 的面板内按钮），单独写小巧的胶囊按钮 */
+  #recBar .rec-stop {
+    flex: none; padding: 5px 9px; border: 1px solid var(--line-2); border-radius: 999px;
+    color: var(--ink); font: 10.5px/1 -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif;
+    letter-spacing: .04em; transition: .15s;
+  }
+  #recBar .rec-stop:hover { background: rgba(255,255,255,.08); }
+  #recBar .rec-stop:active { background: rgba(255,255,255,.14); }
+  /* 窄屏：面板可能只剩一条缝，提示条跟着收窄，不遮画面 */
+  @media (max-width: 560px) { #recBar { max-width: calc(100vw - 20px); } #recBar .txt { overflow: hidden; text-overflow: ellipsis; } }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      transition-duration: .01ms !important;
+      animation-duration: .01ms !important;
+      animation-iteration-count: 1 !important;
+    }
+    /* 例外：加载指示器是"必要的动效"——它本身就在传达"正在计算"。
+       完全停掉会让人以为卡死，所以保留旋转但放慢。 */
+    #busy .spinner { animation-duration: 1.6s !important; animation-iteration-count: infinite !important; }
+    /* 纯粹的装饰性闪烁：去掉 */
+    #recBar .dot { animation: none; }
+  }
+
+  /* ---- 选中态 / 主按钮：单色玻璃 ----
+     玻璃顶 ≈ #515151、底 ≈ #222（刻意压暗，不做成亮白块），纯白文字对比度 ≈ 12:1；
+     上沿 1px 高光 + 下沿压暗 + 1px 投影 = 一块"浮起来"的磨砂玻璃。 */
+  .seg > button[aria-pressed="true"],
+  .btn.active,
+  .btn.primary {
+    background: linear-gradient(180deg, var(--glass-1) 0%, var(--glass-2) 55%, var(--glass-3) 100%);
+    border-color: rgba(255,255,255,.22);
+    color: #fff;
+    font-weight: 600;
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.26),
+                inset 0 -1px 0 rgba(0,0,0,.35),
+                0 1px 2px rgba(0,0,0,.35);
+  }
+  .seg > button[aria-pressed="true"]:active,
+  .btn.active:active,
+  .btn.primary:active { filter: brightness(.92); }   /* 按下时的手感 */
+  /* 主按钮再亮一档，保持"最重要的动作"层级 */
+  .btn.primary {
+    background: linear-gradient(180deg, rgba(255,255,255,.30) 0%, rgba(255,255,255,.17) 55%, rgba(255,255,255,.09) 100%);
+  }
+  .btn.primary:hover {
+    background: linear-gradient(180deg, rgba(255,255,255,.36) 0%, rgba(255,255,255,.21) 55%, rgba(255,255,255,.11) 100%);
+  }
+  /* 播放 / 停止 的图形标记跟随激活态，不在 JS 里拼字符串 */
+  #btnAnim::before, #btnCamAnim::before { content: '▶'; font-size: 8px; line-height: 1; }
+  #btnAnim.active::before, #btnCamAnim.active::before { content: '■'; }
+  #btnAnim:disabled::before { content: '—'; }
+
+  /* ---- 素材信息：键值对齐 ---- */
+  .info { display: flex; flex-direction: column; gap: 5px; font-size: 11px; }
+  .info .li { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+  .info .li .k { color: var(--ink-3); }
+  .info .li .v { color: var(--ink); font-variant-numeric: tabular-nums; }
+  .info .note { margin-top: 1px; }
+
+  /* "回到中心"：默认不占位，中心被平移偏离后才淡入 */
+  .btn.recenter { display: none; }
+  .btn.recenter.show { display: block; animation: recenter-in .18s ease; }
+  @keyframes recenter-in { from { opacity: 0; transform: translateY(-3px); } to { opacity: 1; transform: none; } }
+
+  /* ---- 重算等待提示 ---- */
+  #busy {
+    position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%) scale(.96);
+    z-index: 30; display: flex; align-items: center; gap: 9px;
+    padding: 11px 18px; border: 1px solid var(--line-2); border-radius: 999px;
+    background: var(--panel); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+    box-shadow: 0 12px 36px rgba(0,0,0,.5);
+    color: var(--ink-2); font-size: 12px; letter-spacing: .06em;
+    opacity: 0; pointer-events: none; transition: opacity .16s ease, transform .16s ease;
+  }
+  #busy.show { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+  #busy .spinner {
+    width: 12px; height: 12px; border-radius: 50%;
+    border: 2px solid var(--line-2); border-top-color: var(--ink);
+    animation: busy-spin .7s linear infinite;
+  }
+  @keyframes busy-spin { to { transform: rotate(360deg); } }
+
+  /* ---- 面板收起后的唤出按钮 ---- */
+  #toggleBtn {
+    position: fixed; top: 14px; right: 14px; z-index: 21; padding: 7px 12px;
+    border: 1px solid var(--line-2); border-radius: 8px; background: var(--panel);
+    backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+    color: var(--ink-2); font-size: 11px; letter-spacing: .08em;
+    /* 面板展开时它是隐藏的，同样不能留在 Tab 顺序里 */
+    opacity: 0; pointer-events: none; visibility: hidden;
+    transition: opacity .2s ease, visibility 0s linear .2s;
+  }
+  #toggleBtn.show { opacity: 1; pointer-events: auto; visibility: visible; transition: opacity .2s ease, visibility 0s; }
+  #toggleBtn:hover { color: var(--ink); border-color: var(--ink); }
+</style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "./libs/three.module.js",
+    "three/addons/": "./libs/"
+  }
+}
+</script>
+<script>
+/* 错误自诊断：任何加载/运行问题都会显示在页面顶部
+   —— 本块是「单一真相源」：dist/index.html（分享版/线上版）里的同一段由 build_share.py 正则抽取后注入，
+      改这里就同时改了开发版与分享版。抽取所需的唯一约束见 build_share.py 的 _diag_start/_diag_end 标记。 */
+/* ==== PC_DIAG_START（build_share.py 从这里抽取，勿删）==== */
+(function(){
+  /* 这一层跑在模块之前，拿不到 i18n 词表：直接读语言偏好，用 L(中, 英) 二选一 */
+  var PC_EN = false;
+  try { PC_EN = localStorage.getItem('pc.lang') === 'en'; } catch (e) {}
+  function L(zh, en) { return PC_EN ? en : zh; }
+
+  var shown = '';          /* 当前横幅文字，用于去重与"启动完成后按类清除" */
+  var BOOT_ZH = '程序尚未就绪。首次打开需要下载约 600 KB 的主程序，网络较慢时可能要等十几秒；\n若长时间停在这里，请检查网络后刷新，或换最新版 Chrome / Edge / Safari 再试。';
+  var BOOT_EN = 'The app is not ready yet. The first visit downloads about 600 KB, so a slow connection can take 10+ seconds;\nif it stays like this, check your connection and reload, or try the latest Chrome / Edge / Safari.';
+  function bootMsg(){ return L(BOOT_ZH, BOOT_EN); }
+
+  function show(msg){
+    if (msg === shown) return;                 /* 同一句重复触发不重绘 */
+    shown = msg;
+    var el = document.getElementById('errbar');
+    if(!el){
+      el = document.createElement('div');
+      el.id = 'errbar';
+      el.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:99;background:#f5f5f5;color:#000;padding:9px 14px;font:12px/1.7 -apple-system,"PingFang SC",sans-serif;white-space:pre-wrap;border-bottom:1px solid #000;box-shadow:0 6px 24px rgba(0,0,0,.6)';
+      document.body.appendChild(el);
+    }
+    el.textContent = '! ' + msg;
+  }
+  function clear(){
+    var el = document.getElementById('errbar');
+    if (el && el.parentNode) el.parentNode.removeChild(el);
+    shown = '';
+  }
+  window.__pcShowError = show;
+  window.__pcClearErr = clear;
+  window.addEventListener('error', function(e){
+    if (e.message) show(L('脚本错误：', 'Script error: ') + e.message + (e.lineno ? L('（第 ' + e.lineno + ' 行）', ' (line ' + e.lineno + ')') : ''));
+  });
+  window.addEventListener('unhandledrejection', function(e){
+    var r = e.reason;
+    show(L('模块加载失败：', 'Module failed to load: ') + (r && (r.message || r) || L('未知原因', 'unknown reason')));
+  });
+
+  /* 启动守卫：首次访问要下载整个主程序（约 600 KB，CF 压缩后约 280 KB），
+     慢网/跨境线路下十几秒才就绪是正常的——所以这里只等：
+       · 一旦 __pcReady 置位就立刻清掉横幅（那时程序已经能用了，继续挂着就是误报）
+       · 只有超过 12 秒仍未就绪才提示，且提示的是"网络可能慢"而不是让人去升级浏览器
+     另：脚本自己的报错（脚本错误 / 加载失败）不会被这里清掉，只有本守卫的这条会被清。 */
+  var DEADLINE_MS = 12000, POLL_MS = 200, waited = 0;
+  (function watchdog(){
+    if (window.__pcReady){
+      if (shown === bootMsg()) clear();        /* 已经跑起来了：撤掉误报，真实报错保留 */
+      return;
+    }
+    if (waited >= DEADLINE_MS){
+      show(bootMsg());
+      /* 置位后延迟再查一次，保证"横幅出现后才就绪"也能被撤掉 */
+      var t = setInterval(function(){
+        if (window.__pcReady){ clearInterval(t); if (shown === bootMsg()) clear(); }
+      }, POLL_MS);
+      return;
+    }
+    waited += POLL_MS;
+    setTimeout(watchdog, POLL_MS);
+  })();
+
+  if (location.protocol === 'file:') {
+    show(L('检测到直接双击打开（file://），浏览器会禁止本地模块加载。\n请双击本目录下的 start.command，然后用 http://localhost:8123 打开。',
+            'Opened directly from file:// — browsers block local module loading.\nRun start.command in this folder and open http://localhost:8123 instead.'));
+  }
+  try {
+    if (!(HTMLScriptElement.supports && HTMLScriptElement.supports('importmap'))) {
+      show(L('浏览器版本过旧，不支持 import map（Safari 需 16.4+）。请升级浏览器或改用 Chrome / Edge。',
+              'Browser is too old for import maps (Safari needs 16.4+). Please update, or use Chrome / Edge.'));
+    }
+  } catch(e) {}
+})();
+/* ==== PC_DIAG_END ==== */
+</script>
+</head>
+<body>
+<div id="app"></div>
+<div id="dropzone">
+  <div class="dz-card">
+    <div class="dz-mark">+</div>
+    <div class="dz-title" data-i18n="dzTitle">拖入图片 / 视频 / GIF</div>
+    <div class="dz-hint" data-i18n="dzHint">或点击选择文件 · 转换为带深度的粒子点云 · 拖拽旋转 / 滚轮缩放</div>
+  </div>
+</div>
+<input type="file" id="file" accept="image/*,video/*" hidden>
+<select id="lang" hidden>
+  <option value="zh" selected>中文</option>
+  <option value="en">English</option>
+</select>
+<div id="busy" role="status" aria-live="polite"><span class="spinner"></span><span data-i18n="busy">计算中…</span></div>
+<!-- 导出进行中的提示条：常驻屏幕上方，显示进度并可中止（导出期间务必不要参与截图/录屏） -->
+<div id="recBar" role="status" aria-live="polite">
+  <span class="dot"></span><span class="txt" id="recTxt" data-i18n="recText">渲染中 0 / 0 帧</span>
+  <button class="rec-stop" id="recStop" type="button" data-i18n="recStop">停止</button>
+</div>
+<button type="button" id="toggleBtn" data-i18n="panelChip">面板</button>
+<div id="panelL" class="panel panel-left">
+  <div class="p-head">
+    <div>
+      <h1 data-i18n="appTitle">图片转粒子点云效果</h1>
+      <div class="p-sub" data-i18n="appSub">图片 → 深度点云</div>
+    </div>
+    <div class="head-actions">
+      <div class="seg lang-seg" id="segLang" role="group" aria-label="语言 / Language">
+        <button type="button" data-val="zh" aria-pressed="false" title="中文">中</button>
+        <button type="button" data-val="en" aria-pressed="false" title="English">EN</button>
+      </div>
+      <button class="icon-btn" id="collapseBtn" data-i18n-title="collapse" data-i18n-aria="collapse"
+              title="收起面板" aria-label="收起面板">—</button>
+    </div>
+  </div>
+
+  <details class="group" data-g="source" open>
+    <summary><span class="g-no">01</span><span class="g-name" data-i18n="gSource">素材</span><span class="g-chev"></span></summary>
+    <div class="g-body">
+      <button class="btn" id="btnUpload" data-i18n="btnUpload">换图片 / 视频 / GIF</button>
+      <div id="info" class="info">尚未加载素材</div>
+    </div>
+  </details>
+
+  <!-- 02 背景：颜色 / 渐变（也作为环境光影响实心球体） -->
+  <details class="group" open data-g="bg">
+    <summary><span class="g-no">02</span><span class="g-name" data-i18n="gBg">背景</span><span class="g-chev"></span></summary>
+    <div class="g-body">
+      <div class="ctl">
+        <div class="ctl-head"><label class="k" for="bg" data-i18n="lBg">背景颜色</label></div>
+        <input type="color" id="bg" value="#000000">
+      </div>
+      <div class="note" data-i18n="nBgLight">背景颜色同时作为环境光影响实心球体的明暗与色彩</div>
+      <div class="note" data-i18n="nBgAuto">换图时自动取图片中面积最大的颜色作为背景</div>
+    </div>
+  </details>
+
+  <details class="group" data-g="dist" open>
+    <summary><span class="g-no">03</span><span class="g-name" data-i18n="gDist">粒子分布</span><span class="g-chev"></span></summary>
+    <div class="g-body">
+      <div class="ctl">
+        <div class="ctl-head"><label class="k" for="count" data-i18n="lCount">粒子数量</label><span class="v" id="vCount"></span></div>
+        <input type="range" id="count" min="20000" max="300000" step="10000" value="20000">
+      </div>
+      <div class="ctl">
+        <div class="ctl-head"><label class="k" for="lumMin" data-i18n="lLumMin">亮度下限</label><span class="v" id="vLumMin"></span></div>
+        <input type="range" id="lumMin" min="0" max="255" step="0.5" value="0">
+      </div>
+      <div class="ctl">
+        <div class="ctl-head"><label class="k" for="lumMax" data-i18n="lLumMax">亮度上限</label><span class="v" id="vLumMax"></span></div>
+        <input type="range" id="lumMax" min="0" max="255" step="0.5" value="255">
+        <div class="note" data-i18n="nLumBand">只保留亮度落在上下限之间的像素（0 ~ 255）；下限默认 0 会保纯黑粒子</div>
+      </div>
+      <div class="ctl">
+        <div class="ctl-head"><label class="k" for="dist" data-i18n="lDist">分布偏向</label><span class="v" id="vDist"></span></div>
+        <input type="range" id="dist" min="-1" max="1" step="0.01" value="0.7">
+        <div class="note" data-i18n="nDist">−1 暗部 · 0 均匀 · +1 亮部</div>
+      </div>
+      <div class="note media-off" data-i18n="nMediaOff">视频 / GIF 模式下粒子由画面实时驱动，本组参数不可用</div>
+    </div>
+  </details>
+
+  <details class="group" data-g="depth" open>
+    <summary><span class="g-no">04</span><span class="g-name" data-i18n="gDepth">深度与体积</span><span class="g-chev"></span></summary>
+    <div class="g-body">
+      <div class="ctl">
+        <div class="ctl-head"><span class="k" data-i18n="lDepthSrc">深度来源</span></div>
+        <select id="depthMode" hidden>
+          <option value="brightness" selected>亮度映射</option>
+          <option value="noise">随机噪声</option>
+        </select>
+        <div class="seg" id="segDepthMode" role="group" aria-label="深度来源" data-i18n-aria="lDepthSrc">
+          <button type="button" data-val="brightness" aria-pressed="false" data-i18n="oBright">亮度映射</button>
+          <button type="button" data-val="noise" aria-pressed="false" data-i18n="oNoise">随机噪声</button>
+        </div>
+        <div class="note" data-i18n="nDepthFixed">亮部近 · 暗部远</div>
+      </div>
+      <div class="ctl">
+        <div class="ctl-head"><label class="k" for="depth" data-i18n="lDepth">深度强度</label><span class="v" id="vDepth"></span></div>
+        <input type="range" id="depth" min="0" max="6" step="0.1" value="6">
+      </div>
+      <div class="ctl">
+        <div class="ctl-head"><label class="k" for="noise" data-i18n="lNoise">噪声扰动</label><span class="v" id="vNoise"></span></div>
+        <input type="range" id="noise" min="0" max="2" step="0.05" value="0.3">
+      </div>
+    </div>
+  </details>
+
+  <details class="group" data-g="look" open>
+    <summary><span class="g-no">05</span><span class="g-name" data-i18n="gLook">粒子外观</span><span class="g-chev"></span></summary>
+    <div class="g-body">
+      <div class="ctl">
+        <div class="ctl-head"><label class="k" for="size" data-i18n="lSize">粒子大小</label><span class="v" id="vSize"></span></div>
+        <input type="range" id="size" min="0.1" max="2" step="0.05" value="0.5">
+      </div>
+      <div class="ctl">
+        <div class="ctl-head"><label class="k" for="bright" data-i18n="lBright">粒子明度</label><span class="v" id="vBright"></span></div>
+        <input type="range" id="bright" min="0.2" max="2.5" step="0.05" value="1">
+      </div>
+      <div class="ctl">
+        <div class="ctl-head"><label class="k" for="sat" data-i18n="lSat">粒子饱和度</label><span class="v" id="vSat"></span></div>
+        <input type="range" id="sat" min="0" max="2" step="0.02" value="1">
+        <div class="note" data-i18n="nSat">0 = 黑白 · 1 = 原色 · 2 = 浓艳</div>
+      </div>
+      <div class="ctl">
+        <div class="ctl-head"><span class="k" data-i18n="lForm">粒子形态</span></div>
+        <select id="solid" hidden>
+          <option value="0" selected>柔和光点</option>
+          <option value="1">实心球体</option>
+        </select>
+        <div class="seg" id="segSolid" role="group" aria-label="粒子形态" data-i18n-aria="lForm">
+          <button type="button" data-val="0" aria-pressed="false" data-i18n="oFormSoft">柔和光点</button>
+          <button type="button" data-val="1" aria-pressed="false" data-i18n="oFormSolid">实心球体</button>
+        </div>
+        <div class="sub-label" data-i18n="nForm">实心球体：球面受光 + 近处粒子真实遮挡远处</div>
+      </div>
+      <div class="ctl">
+        <div class="ctl-head"><label class="k" for="bloom" data-i18n="lBloom">辉光强度</label><span class="v" id="vBloom"></span></div>
+        <input type="range" id="bloom" min="0" max="2.5" step="0.05" value="0">
+      </div>
+    </div>
+  </details>
+</div>
+<div id="panel" class="panel panel-right">
+  <details class="group" data-g="motion" open>
+    <summary><span class="g-no">06</span><span class="g-name" data-i18n="gMotion">粒子动态</span><span class="g-chev"></span></summary>
+    <div class="g-body">
+      <div class="ctl">
+        <div class="ctl-head"><label class="k" for="floatAmp" data-i18n="lFloat">漂浮幅度</label><span class="v" id="vFloatAmp"></span></div>
+        <input type="range" id="floatAmp" min="0" max="0.4" step="0.01" value="0.2">
+      </div>
+      <div class="divider"></div>
+      <div class="sub-label" data-i18n="subFlow">动态分布 · 沿亮度轨迹流动</div>
+      <button class="btn" id="btnAnim" data-i18n="btnAnimIdle">开始流动</button>
+      <div class="ctl">
+        <div class="ctl-head"><span class="k" data-i18n="lRange">动态范围</span><span class="k2">−1 ~ +1</span></div>
+        <div class="range-pair">
+          <input type="number" id="animFrom" min="-1" max="1" step="0.1" value="-0.2" aria-label="动态范围起点" data-i18n-aria="ariaAnimFrom">
+          <span class="arrow">→</span>
+          <input type="number" id="animTo" min="-1" max="1" step="0.1" value="0.9" aria-label="动态范围终点" data-i18n-aria="ariaAnimTo">
+        </div>
+        <div class="note" data-i18n="nRange">端点间按 0.1 逐级演变 · 往返循环</div>
+      </div>
+      <div class="ctl">
+        <div class="ctl-head"><label class="k" for="animSpeed" data-i18n="lSpeed">流动速度</label><span class="v" id="vAnimSpeed"></span></div>
+        <input type="range" id="animSpeed" min="0.1" max="3" step="0.1" value="0.1">
+      </div>
+      <div class="ctl">
+        <div class="ctl-head"><label class="k" for="animPhase" data-i18n="lPhase">相位散布</label><span class="v" id="vAnimPhase"></span></div>
+        <input type="range" id="animPhase" min="0" max="0.7" step="0.05" value="0.7">
+        <div class="note" data-i18n="nPhase">小 = 分布精确 · 大 = 粒子流绵密</div>
+      </div>
+      <div class="note media-off" data-i18n="nMediaOff2">视频 / GIF 模式下不可用</div>
+    </div>
+  </details>
+
+  <details class="group" data-g="camera" open>
+    <summary><span class="g-no">07</span><span class="g-name" data-i18n="gCamera">镜头视角</span><span class="g-chev"></span></summary>
+    <div class="g-body">
+      <div class="ctl">
+        <div class="ctl-head"><span class="k" data-i18n="lAutoRotate">自动旋转</span></div>
+        <select id="autoRotate" hidden>
+          <option value="0" selected>关</option>
+          <option value="1">开</option>
+        </select>
+        <div class="seg" id="segAutoRotate" role="group" aria-label="自动旋转" data-i18n-aria="lAutoRotate">
+          <button type="button" data-val="0" aria-pressed="false" data-i18n="oOff">关</button>
+          <button type="button" data-val="1" aria-pressed="false" data-i18n="oOn">开</button>
+        </div>
+      </div>
+      <button class="btn" id="btnCamAnim" data-i18n="btnCamIdle">镜头环绕巡游</button>
+      <button class="btn" id="btnReset" data-i18n="btnReset">重置视角</button>
+      <button class="btn recenter" id="btnRecenter" data-i18n="btnRecenter">视图回到中心</button>
+      <div class="note" data-i18n="nCamLock">巡游播放中不可手动旋转</div>
+    </div>
+  </details>
+
+  <details class="group" data-g="export">
+    <summary><span class="g-no">08</span><span class="g-name" data-i18n="gExport">渲染导出</span><span class="g-chev"></span></summary>
+    <div class="g-body">
+      <div class="ctl">
+        <div class="ctl-head"><span class="k" data-i18n="lContent">内容</span></div>
+        <select id="expMode" hidden>
+          <option value="anim" selected>动画序列</option>
+          <option value="still">当前单帧</option>
+        </select>
+        <div class="seg" id="segExpMode" role="group" aria-label="导出内容" data-i18n-aria="lContent">
+          <button type="button" data-val="anim" aria-pressed="false" data-i18n-title="tExpAnim" data-i18n="oSeq">序列</button>
+          <button type="button" data-val="still" aria-pressed="false" data-i18n-title="tExpStill" data-i18n="oStill">单帧</button>
+        </div>
+      </div>
+      <div class="divider"></div>
+      <div class="sub-row">
+        <span class="sub-label" data-i18n="lSeqSettings">序列设置</span>
+        <span class="sub-tag still-off" data-i18n="nStillOff">单帧导出时不可用</span>
+      </div>
+      <div class="ctl seq-only">
+        <div class="ctl-head"><label class="k" for="expSec" data-i18n="lDuration">时长</label><span class="k2" data-i18n="lSeconds">秒</span></div>
+        <input type="number" id="expSec" min="1" max="120" step="1" value="8">
+      </div>
+      <div class="ctl seq-only">
+        <div class="ctl-head"><span class="k" data-i18n="lFps">序列帧率</span></div>
+        <select id="expFps" hidden>
+          <option value="30" selected>30</option>
+          <option value="24">24</option>
+          <option value="60">60</option>
+        </select>
+        <div class="seg" id="segExpFps" role="group" aria-label="序列帧率" data-i18n-aria="lFps">
+          <button type="button" data-val="24" aria-pressed="false">24</button>
+          <button type="button" data-val="30" aria-pressed="false">30</button>
+          <button type="button" data-val="60" aria-pressed="false">60</button>
+        </div>
+      </div>
+      <div class="divider"></div>
+      <div class="sub-label" data-i18n="lOutput">输出</div>
+      <div class="ctl">
+        <div class="ctl-head"><label class="k" for="expRes" data-i18n="lRes">分辨率</label></div>
+        <select id="expRes">
+          <option value="1920x1080" selected>1920 × 1080</option>
+          <option value="2560x1440">2560 × 1440</option>
+          <option value="3840x2160">3840 × 2160</option>
+          <option value="window" data-i18n="oWindow">当前窗口</option>
+        </select>
+      </div>
+      <div class="ctl">
+        <div class="ctl-head"><span class="k" data-i18n="lFmt">格式</span></div>
+        <select id="expFmt" hidden>
+          <option value="jpeg" selected>JPEG</option>
+          <option value="png">PNG</option>
+        </select>
+        <div class="seg" id="segExpFmt" role="group" aria-label="格式" data-i18n-aria="lFmt">
+          <button type="button" data-val="jpeg" aria-pressed="false" title="JPEG（体积小）">JPEG</button>
+          <button type="button" data-val="png" aria-pressed="false" title="PNG（无损）">PNG</button>
+        </div>
+      </div>
+      <button class="btn primary" id="btnExport" data-i18n="btnExportSeq">导出帧序列</button>
+      <div class="note" data-i18n="nExport">逐帧离线渲染，选文件夹后按 frame_00001 顺序保存，可在剪辑软件中按序列导入</div>
+    </div>
+  </details>
+</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+
+const $ = id => document.getElementById(id);
+
+/* ================= 语言（中 / EN） =================
+   静态文案：HTML 上标 data-i18n / data-i18n-title / data-i18n-aria，applyLang() 一次性替换；
+   动态文案（滑块读数、按钮状态、素材信息）：由 applyLang() 触发的 refresh* 函数重算。 */
+const I18N = {
+  zh: {
+    docTitle: '图片转粒子点云效果',
+    appTitle: '图片转粒子点云效果', appSub: '图片 → 深度点云',
+    collapse: '收起面板', panelChip: '面板',
+    dzTitle: '拖入图片 / 视频 / GIF',
+    dzHint: '或点击选择文件 · 转换为带深度的粒子点云 · 拖拽旋转 / 滚轮缩放',
+    gSource: '素材', gDist: '粒子分布', gDepth: '深度与体积', gLook: '粒子外观',
+    gMotion: '粒子动态', gCamera: '镜头视角', gExport: '渲染导出',
+    btnUpload: '换图片 / 视频 / GIF',
+    infoEmpty: '尚未加载素材', nNoPixels: '图中没有可用像素（几乎全黑或全透明）',
+    kImage: '图片', kVideo: '视频', kGif: 'GIF', kParticles: '粒子', kPcs: ' 个',
+    nOrbit: '拖拽旋转 · 滚轮缩放', nMediaLive: '画面内容实时驱动粒子颜色与深度',
+    lCount: '粒子数量', lLumMin: '亮度下限', lLumMax: '亮度上限', lDist: '分布偏向',
+    nLumBand: '只保留亮度落在上下限之间的像素（0 ~ 255）；下限默认 0 会保留纯黑粒子',
+    nLumMin: '明度低于此值（0 ~ 255）的像素不生成粒子',
+    nDist: '−1 暗部 · 0 均匀 · +1 亮部',
+    nMediaOff: '视频 / GIF 模式下粒子由画面实时驱动，本组参数不可用',
+    lDepthSrc: '深度来源', oBright: '亮度映射', oNoise: '随机噪声', nDepthFixed: '亮部近 · 暗部远',
+    lDepth: '深度强度', lNoise: '噪声扰动',
+    lSize: '粒子大小', lBloom: '辉光强度',
+    gBg: '背景', lBg: '背景颜色', reset: '重置为默认值', busy: '计算中…',
+    nBgLight: '背景颜色同时作为环境光影响实心球体的明暗与色彩；辉光不会作用于背景', nBgAuto: '换图时自动取图片中面积最大的颜色作为背景',
+    lBright: '粒子明度', lSat: '粒子饱和度', nSat: '0 = 黑白 · 1 = 原色 · 2 = 浓艳',
+    lForm: '粒子形态', oFormSoft: '柔和光点', oFormSolid: '实心球体',
+    nForm: '实心球体：影棚 HDR 打光 + 近处粒子真实遮挡远处',
+    lFloat: '漂浮幅度', subFlow: '动态分布 · 沿亮度轨迹流动',
+    btnAnimIdle: '开始流动', btnAnimRun: '停止流动', btnAnimBusy: '计算轨迹…', btnAnimOff: '视频 / GIF 模式不可用',
+    lRange: '动态范围', nRange: '端点间按 0.1 逐级演变 · 往返循环',
+    ariaAnimFrom: '动态范围起点', ariaAnimTo: '动态范围终点',
+    lSpeed: '流动速度', lPhase: '相位散布', nPhase: '小 = 分布精确 · 大 = 粒子流绵密',
+    nMediaOff2: '视频 / GIF 模式下不可用',
+    lAutoRotate: '自动旋转', oOff: '关', oOn: '开',
+    btnCamIdle: '镜头环绕巡游', btnCamRun: '停止巡游', btnReset: '重置视角',
+    btnRecenter: '视图回到中心',
+    nCamLock: '巡游播放中不可手动旋转',
+    lContent: '内容', oSeq: '序列', oStill: '单帧',
+    tExpAnim: '按帧率渲染整段动画序列', tExpStill: '只渲染当前这一帧',
+    lSeqSettings: '序列设置', nStillOff: '单帧导出时不可用',
+    lDuration: '时长', lSeconds: '秒', lFps: '序列帧率',
+    lOutput: '输出', lRes: '分辨率', oWindow: '当前窗口', lFmt: '格式',
+    btnExportSeq: '导出帧序列', btnExportStill: '导出单帧',
+    nExport: '逐帧离线渲染，选文件夹后按 frame_00001 顺序保存，可在剪辑软件中按序列导入',
+    exporting: '渲染中…', exportUnit: '',
+    recText: '渲染中 0 / 0 帧', recProgress: '渲染中', recStop: '停止', recStopping: '正在停止…',
+    errNoDir: '此浏览器不支持文件夹导出（需最新版 Chrome / Edge）。',
+    errExport: '导出中断：', errVideo: '视频加载失败：格式可能不被浏览器支持（试试 MP4）。',
+    errGif: 'GIF 解码失败：', errGifOld: '浏览器版本过旧，无法播放 GIF（需 Chrome 94+）。',
+    errTestImg: '测试图加载失败：', errShader: '着色器编译失败：\n',
+  },
+  en: {
+    docTitle: 'Image → Particle Point Cloud',
+    appTitle: 'Image → Particle Point Cloud', appSub: 'Image → depth cloud',
+    collapse: 'Collapse panel', panelChip: 'Panel',
+    dzTitle: 'Drop image / video / GIF',
+    dzHint: 'or click to choose a file · becomes a depth point cloud · drag to orbit / scroll to zoom',
+    gSource: 'Source', gDist: 'Distribution', gDepth: 'Depth & Volume', gLook: 'Appearance',
+    gMotion: 'Motion', gCamera: 'Camera', gExport: 'Export',
+    btnUpload: 'Replace image / video / GIF',
+    infoEmpty: 'No media loaded', nNoPixels: 'No usable pixels (image is nearly black or transparent)',
+    kImage: 'Image', kVideo: 'Video', kGif: 'GIF', kParticles: 'Particles', kPcs: '',
+    nOrbit: 'Drag to orbit · scroll to zoom', nMediaLive: 'Frame content drives color and depth live',
+    lCount: 'Particle count', lLumMin: 'Brightness floor', lLumMax: 'Brightness ceiling', lDist: 'Distribution bias',
+    nLumBand: 'Keep only pixels between the two limits (0-255); floor 0 keeps pure-black particles',
+    nLumMin: 'Pixels darker than this (0 ~ 255) spawn no particles',
+    nDist: '−1 shadows · 0 even · +1 highlights',
+    nMediaOff: 'In video / GIF mode the frame drives the particles; this group is inactive',
+    lDepthSrc: 'Depth source', oBright: 'Brightness', oNoise: 'Noise', nDepthFixed: 'Bright = near · dark = far',
+    lDepth: 'Depth strength', lNoise: 'Noise jitter',
+    lSize: 'Particle size', lBloom: 'Glow',
+    gBg: 'Background', lBg: 'Background', reset: 'Reset to default', busy: 'Working…',
+    nBgLight: 'Background colour also lights the solid spheres as ambient', nBgAuto: 'On load, background is set to the image\'s largest-area colour',
+    lBright: 'Brightness', lSat: 'Saturation', nSat: '0 = mono · 1 = original · 2 = vivid',
+    lForm: 'Particle form', oFormSoft: 'Soft dot', oFormSolid: 'Solid sphere',
+    nForm: 'Solid sphere: studio HDR lighting · near particles truly hide far ones',
+    lFloat: 'Float amount', subFlow: 'Flow · along the brightness path',
+    btnAnimIdle: 'Start flow', btnAnimRun: 'Stop flow', btnAnimBusy: 'Building paths…', btnAnimOff: 'Unavailable in video / GIF mode',
+    lRange: 'Range', nRange: 'Steps of 0.1 between the ends, looping',
+    ariaAnimFrom: 'Range start', ariaAnimTo: 'Range end',
+    lSpeed: 'Flow speed', lPhase: 'Phase spread', nPhase: 'Small = precise · large = denser flow',
+    nMediaOff2: 'Unavailable in video / GIF mode',
+    lAutoRotate: 'Auto-rotate', oOff: 'Off', oOn: 'On',
+    btnCamIdle: 'Orbit camera', btnCamRun: 'Stop orbit', btnReset: 'Reset view',
+    btnRecenter: 'Recenter view',
+    nCamLock: 'Manual orbit is locked while touring',
+    lContent: 'Content', oSeq: 'Sequence', oStill: 'Single frame',
+    tExpAnim: 'Render the whole animation as a frame sequence', tExpStill: 'Render only the current frame',
+    lSeqSettings: 'Sequence settings', nStillOff: 'inactive for single frame',
+    lDuration: 'Duration', lSeconds: 'sec', lFps: 'Frame rate',
+    lOutput: 'Output', lRes: 'Resolution', oWindow: 'Window', lFmt: 'Format',
+    btnExportSeq: 'Export sequence', btnExportStill: 'Export still',
+    nExport: 'Rendered offline frame by frame · saved as frame_00001… · imports as an image sequence',
+    exporting: 'Rendering…', exportUnit: '',
+    recText: 'Rendering 0 / 0 frames', recProgress: 'Rendering', recStop: 'Stop', recStopping: 'Stopping…',
+    errNoDir: 'This browser cannot export to a folder (needs recent Chrome / Edge).',
+    errExport: 'Export interrupted: ', errVideo: 'Video failed to load: the format may be unsupported (try MP4).',
+    errGif: 'GIF decode failed: ', errGifOld: 'Browser is too old to play GIF (needs Chrome 94+).',
+    errTestImg: 'Test image failed to load: ', errShader: 'Shader compile error:\n',
+  },
+};
+let LANG = 'zh';
+try { const saved = localStorage.getItem('pc.lang'); if (saved === 'en' || saved === 'zh') LANG = saved; } catch (e) {}
+/* 取名 tr 而非 t：本文件里 t 大量用作时间变量（着色器 / 动画 / 导出循环），tr() 会被遮蔽 */
+const tr = k => (I18N[LANG] && I18N[LANG][k] !== undefined) ? I18N[LANG][k] : (I18N.zh[k] !== undefined ? I18N.zh[k] : k);
+window.__PC_I18N = I18N;                 // 测试钩子：检查中英词条是否一一对应
+const app = $('app');
+
+/* ================= 基础场景 ================= */
+/* preserveDrawingBuffer：录屏（canvas.captureStream）需要保留帧缓冲，否则抓到空帧 */
+const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+app.appendChild(renderer.domElement);
+/* 着色器编译失败时把错误显示到页面红条，方便排查 */
+renderer.debug.onShaderError = (gl, program, vs, fs) => {
+  /* varying 不匹配这类"链接"失败，信息在 program 的 log 里，两个 shader 的 log 往往是空的；
+     只读 shader log 会让红条显示一条空错误（排查时白等一轮）。 */
+  const log = [gl.getShaderInfoLog(vs), gl.getShaderInfoLog(fs), gl.getProgramInfoLog(program)]
+    .filter(Boolean).join('\n');
+  console.error('着色器编译错误：', log);
+  if (window.__pcShowError) window.__pcShowError(tr('errShader') + log.slice(0, 400));
+};
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x000000);
+
+const camera = new THREE.PerspectiveCamera(50, innerWidth / innerHeight, 0.1, 200);
+camera.position.set(0, 0, 8.5);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.dampingFactor = 0.06;
+controls.autoRotate = false;          // 默认不自动旋转（可在面板开启）
+controls.autoRotateSpeed = 0.8;
+controls.minDistance = 2;
+controls.maxDistance = 40;
+/* 中键（滚轮按下）拖动 = 平移。OrbitControls 默认中键是推拉镜头，
+   但滚轮已经能缩放，把中键让给平移更顺手；右键保持默认的平移不变。 */
+controls.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.PAN, RIGHT: THREE.MOUSE.PAN };
+controls.screenSpacePanning = true;   // 平移沿屏幕平面，符合"上下左右拖"的直觉
+
+/* ================= 镜头动画（环绕巡游，默认关闭） ================= */
+function updateCamBtnLabel() {
+  $('btnCamAnim').textContent = camAnimActive ? tr('btnCamRun') : tr('btnCamIdle');
+}
+let camAnimActive = false;
+let camAnimT0 = 0;                     // 激活时刻（秒）
+
+function startCamAnim() {
+  camAnimActive = true;
+  camAnimT0 = clock ? clock.getElapsedTime() : performance.now() / 1000;
+  controls.enabled = false;            // 播放期间接管相机，禁用手动旋转
+  updateCamBtnLabel();
+  $('btnCamAnim').classList.add('active');
+}
+function stopCamAnim() {
+  camAnimActive = false;
+  controls.enabled = true;
+  updateCamBtnLabel();
+  $('btnCamAnim').classList.remove('active');
+}
+/* 空间轨迹：绕原点椭圆环绕 + 远近呼吸 + 高低起伏，全方位查看点云 */
+function updateCamAnim(t) {
+  const a = t * 0.31;                                   // 方位角（约 20 秒一圈）
+  const r = 8.5 + 3.5 * Math.sin(t * 0.42);             // 远近 5 ~ 12
+  const h = 2.6 * Math.sin(t * 0.52);                   // 高低 ±2.6
+  camera.position.set(r * Math.cos(a), h, r * Math.sin(a));
+  camera.lookAt(0, 0, 0);
+  controls.target.set(0, 0, 0);
+}
+
+/* ================= 后处理（辉光） ================= */
+const composer = new EffectComposer(renderer);
+composer.addPass(new RenderPass(scene, camera));
+const bloomPass = new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), 0.9, 0.5, 0.45);
+composer.addPass(bloomPass);
+composer.addPass(new OutputPass());
+
+/* 取"图片中面积最大的颜色"：RGB 各取高 5 位量化成 32³ 粗直方图 → 命中最多像素的桶，
+   再对该桶内的像素求平均（避免量化误差把颜色带偏）。两遍全图扫描，约十几毫秒。 */
+function dominantColor(img) {
+  const { data, width: w, height: h } = img;
+  const B = 32, SH = 3;
+  const bins = new Uint32Array(B * B * B);
+  const n = w * h;
+  const binOf = i => ((data[i] >> SH) * B + (data[i + 1] >> SH)) * B + (data[i + 2] >> SH);
+  for (let p = 0; p < n; p++) {
+    const i = p * 4;
+    if (data[i + 3] < 10) continue;
+    bins[binOf(i)]++;
+  }
+  let best = -1, bestN = 0;
+  for (let b = 0; b < bins.length; b++) if (bins[b] > bestN) { bestN = bins[b]; best = b; }
+  if (best < 0) return null;
+  let r = 0, g = 0, bl = 0, c = 0;
+  for (let p = 0; p < n; p++) {
+    const i = p * 4;
+    if (data[i + 3] < 10 || binOf(i) !== best) continue;
+    r += data[i]; g += data[i + 1]; bl += data[i + 2]; c++;
+  }
+  if (!c) return null;
+  const hx = v => Math.round(v / c).toString(16).padStart(2, '0');
+  return '#' + hx(r) + hx(g) + hx(bl);
+}
+
+/* ================= 背景 =================
+   用一块覆盖全屏的四边形来画背景，而不是 scene.background —— 因为需要"上下两色渐变"。
+   depthTest / depthWrite 全关、renderOrder = -1，让它最先画且完全不影响粒子深度。 */
+const bgAmbient = new THREE.Color(0, 0, 0);      // 供实心球做环境光的背景色（线性）
+const bgMat = new THREE.ShaderMaterial({
+  uniforms: { uTop: { value: new THREE.Color(0, 0, 0) }, uBottom: { value: new THREE.Color(0, 0, 0) } },
+  vertexShader: 'varying vec2 vP; void main(){ vP = position.xy; gl_Position = vec4(position.xy, 0.0, 1.0); }',
+  fragmentShader: `varying vec2 vP; uniform vec3 uTop; uniform vec3 uBottom;
+    void main(){ gl_FragColor = vec4(mix(uBottom, uTop, vP.y * 0.5 + 0.5), 1.0); }`,
+  depthTest: false, depthWrite: false, transparent: false,
+});
+const bgQuad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), bgMat);
+bgQuad.frustumCulled = false;
+bgQuad.renderOrder = -1;
+scene.add(bgQuad);
+
+/* 应用背景色：写进全屏背景面 + 同步给实心球做环境光 */
+function applyBackground() {
+  const c = new THREE.Color(params.bg);
+  bgMat.uniforms.uTop.value.copy(c);
+  bgMat.uniforms.uBottom.value.copy(c);
+  scene.background.set(params.bg);
+  bgAmbient.copy(c);
+  setAllLayersUniform('uBgColor', bgAmbient);    // 共用同一对象 → 后续变化自动同步
+  updateBloomThreshold();
+}
+
+/* 辉光阈值抬到背景亮度之上：否则亮背景自己也会被高光提取、整片糊开（用户反馈）。
+   代价是"比背景更暗的粒子"不再参与辉光 —— 这是合理的，暗于背景的东西本来也不该发光。 */
+function updateBloomThreshold() {
+  const c = new THREE.Color(params.bg);
+  const luma = 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;   // 线性亮度
+  bloomPass.threshold = Math.max(0.45, luma + 0.06);
+}
+
+/* ================= 着色器 ================= */
+const vert = /* glsl */`
+  attribute vec3 aRandom;
+  attribute vec3 color;              // three.js 不会自动声明，必须手动写
+  attribute vec2 aUV;                // 视频/GIF 模式的纹理坐标（图片模式不用）
+  attribute float aAO;               // 烘焙的接触阴影（1 = 完全无遮挡）
+  uniform float uTime;
+  uniform float uProgress;   // 0 → 1，粒子聚合动画
+  uniform float uSize;
+  uniform float uFloatAmp;
+  uniform float uMediaMode;  // 0 = 图片模式；1 = 视频/GIF 模式（GPU 采样帧纹理）
+  uniform sampler2D uMediaTex;
+  uniform float uDepthRange; // 视频模式：亮度 → 深度范围（固定"亮近暗远"）
+  uniform float uNoise;      // 视频模式：深度噪声
+  uniform float uResScale;   // 绘制缓冲高度 / 参考高度：让粒子的世界尺寸与分辨率无关
+  varying vec3 vColor;
+  varying float vBright;
+  varying float vAO;         // 接触阴影
+  void main() {
+    vec3 pos = position;
+    vec3 col = color;
+    if (uMediaMode > 0.5) {
+      /* 视频/GIF：粒子固定网格，颜色与深度由画面帧纹理驱动 */
+      vec4 t = texture2D(uMediaTex, aUV);
+      col = t.rgb;
+      float L = dot(t.rgb, vec3(0.299, 0.587, 0.114));
+      pos.z = (L - 0.5) * uDepthRange + (aRandom.z - 0.5) * uNoise;
+    } else {
+      // 聚合动画：粒子从随机位置飞向目标位置
+      vec3 start = (aRandom - 0.5) * 26.0;
+      float t = uProgress;
+      t = t * t * (3.0 - 2.0 * t);            // smoothstep 缓动
+      pos = mix(start, pos, t);
+    }
+    // 轻微漂浮（让点云"活着"）
+    pos.z += sin(uTime * 0.8 + aRandom.z * 6.2831) * uFloatAmp;
+    vec4 mv = modelViewMatrix * vec4(pos, 1.0);
+    gl_Position = projectionMatrix * mv;
+    /* 每粒子随机尺寸（0.65~1.35 倍）：打破均匀圆点的规则间隙网络（网格观感） */
+    /* uResScale 修正：原先这里的常数不随渲染分辨率变化，导致分辨率越高、粒子在画面上
+       反而越小（世界尺寸随分辨率改变）。乘上 高度/参考高度 后，粒子的世界尺寸恒定，
+       像素尺寸随分辨率等比放大 —— 4K 导出才真的比预览更细腻，Retina 与非 Retina 也一致。 */
+    /* 上限钳制：部分 GPU 的 ALIASED_POINT_SIZE_RANGE 上限是 255 甚至 63（老移动端），
+       超出会被驱动静默截断 → 同一个参数在不同机器上观感不一致（相机拉近 + 4K 导出时算得到 250px 以上） */
+    gl_PointSize = min(uSize * (0.65 + 0.7 * aRandom.x) * (160.0 * uResScale / -mv.z), 256.0);
+    vAO = aAO;
+    vColor = col;
+    /* col 现在是线性色，直接取平均会偏暗；开 1/2.2 近似回到感知亮度，
+       让"亮的点更实"这套软点 alpha 行为保持原来的观感 */
+    vBright = pow(max(dot(col, vec3(0.2126, 0.7152, 0.0722)), 0.0), 1.0 / 2.2);
+  }
+`;
+/* 柔和光点：圆形软边 + 亮度调制不透明度（叠加发光模式已按需求移除） */
+const fragNormal = /* glsl */`
+  varying vec3 vColor;
+  varying float vBright;
+  uniform float uOpacity;    // 图层整体透明度（动态分布交叉淡化用）
+  uniform float uAlpha;      // 用户透明度（面板滑块）
+  uniform float uSolid;      // 1 = 本图层完全在场（非交叉淡化中）
+  uniform float uCoreT;      // 核心阈值：不小于此值的区域参加遮挡
+  uniform float uSaturation; // 粒子饱和度（面板）：1 = 原色，0 = 黑白
+  uniform float uBright;     // 粒子明度倍率（面板）
+  void main() {
+    vec2 uv = gl_PointCoord - 0.5;
+    float d = length(uv);
+    float a = smoothstep(0.5, 0.15, d);
+    a *= 0.3 + 0.7 * vBright;
+    a *= uAlpha;
+    float core = step(uCoreT, a);          // 是否落在"实心核心"内（不含图层交叉淡化）
+    a *= uOpacity;
+    if (a < 0.01) discard;
+    /* 核心区域强制为完全不透明 —— 这是消除暗环的关键。
+       深度预通道只在核心写深度；若核心本身是半透明的，那圈"后面已被剔除、自己又不够实"
+       的像素就只能与黑背景混合，于是每颗粒子套一圈暗环（实测确实如此）。
+       让"写深度的像素同时输出 alpha = 1"，暗环从结构上不可能出现。
+       注意目标是 uOpacity 而不是常数 1：交叉淡化期间图层本来就是半透明的，
+       若强行拉到 1，两层都变实，淡化就不是淡化了；而若完全不做核心增强，
+       淡化期间整片点云又会明显变暗（用户反馈的"一按流动就变暗"）。 */
+    a = mix(a, uOpacity, core);
+    float luma = dot(vColor, vec3(0.2126, 0.7152, 0.0722));
+    vec3 col = mix(vec3(luma), vColor, uSaturation) * uBright;
+    gl_FragColor = vec4(col, a);
+  }
+`;
+
+/* 柔和光点的"深度预通道"：只让足够不透明的核心写深度，用来建立粒子间的前后遮挡。
+   背景：柔和光点的 alpha 从中心到边缘渐隐，若让整片都写深度，那圈半透明外圈会把后面的
+   粒子剔掉、只剩它自己与黑背景混合 → 每颗粒子套一圈黑边（早期版本踩过的坑，实测
+   559 个孤立黑点）。拆成两遍就没有这个问题：
+     第一遍（本着色器，不出颜色）只画核心写深度 → 建立前后关系
+     第二遍（fragNormal）照常画完整柔边，只做深度测试不再写深度
+   于是中心被近处核心挡住、不再透出后面的粒子，边缘仍然是柔的，也不会产生黑环。 */
+const fragCore = /* glsl */`
+  varying vec3 vColor;
+  varying float vBright;
+  uniform float uOpacity;    // 图层交叉淡化
+  uniform float uAlpha;      // 用户透明度
+  uniform float uCoreT;      // 写入深度的最低不透明度
+  uniform float uSolid;      // 1 = 本图层完全在场
+  void main() {
+    /* 交叉淡化中的图层不参与遮挡：否则淡出的旧层会把淡入的新层挡掉 */
+    if (uSolid < 0.5) discard;
+    vec2 uv = gl_PointCoord - 0.5;
+    float d = length(uv);
+    float a = smoothstep(0.5, 0.15, d) * (0.3 + 0.7 * vBright) * uOpacity * uAlpha;
+    /* 只保留"自身已经足够实"的区域：粒子越暗核心越小，越透明则不参与遮挡——
+       这与肉眼直觉一致：看得穿的粒子不该挡住别人 */
+    if (a < uCoreT) discard;
+  }
+`;
+
+/* 实心球体：用 gl_PointCoord 伪造球面法线，配一套 PBR 光照（程序化 HDR 影棚 IBL + 菲涅尔镜面
+   + ACES 色调映射），并写"逐像素球面深度"。
+   为什么必须不透明：黑边的成因是"半透明像素写了深度"——外圈像素把后面的粒子剔掉了，
+   只剩它自己以低 alpha 与黑背景混合，于是每颗粒子套一圈暗环。
+   这里轮廓用硬切（rho2 > 1 直接 discard），参与深度写入的像素全部 alpha = 1，黑边从根上消失。
+   代价是轮廓没有抗锯齿，但球体边缘本来就是背光的暗部，肉眼几乎看不出锯齿。 */
+const fragSphere = /* glsl */`
+  varying vec3 vColor;
+  varying float vAO;
+  uniform float uOpacity;    // 图层交叉淡化
+  uniform float uAlpha;      // 用户透明度：球模式下压暗 RGB（保持不透明，故不影响深度关系）
+  uniform float uSolid;      // 1 = 本图层写深度（必须完全不透明）；0 = 淡化中（走普通 alpha 混合）
+  uniform float uSaturation; // 粒子饱和度（面板）
+  uniform float uBright;     // 粒子明度倍率（面板）
+  uniform float uRough;      // 粗糙度：0 = 镜面，1 = 全哑光（由固定光泽 50% 映射而来）
+  uniform float uDiffuse;    // 漫反射强度（标定：正对主光的球面亮度 ≈ 原图颜色）
+  uniform float uSpecScale;  // 镜面强度
+  uniform float uAOStrength; // 接触阴影强度（0 = 关闭，便于对照）
+  uniform vec3 uBgColor;     // 背景色（线性）：既作为环境光源，也是"透明度"淡出的目标色
+  uniform float uBgAmbient;  // 背景作为环境光的强度
+
+  /* 影棚灯光方向（视图空间，随相机固定 —— 等同产品摄影里灯跟着机位走） */
+  const vec3 KEY_DIR  = vec3(-0.477, 0.643, 0.599);
+  const vec3 RIM_DIR  = vec3( 0.799, 0.300, -0.521);
+  const vec3 FILL_DIR = vec3( 0.142, -0.812, 0.566);
+
+  /* ---------- 程序化 HDR 影棚灯光 ----------
+     分享版必须能 file:// 离线双击打开，不能依赖外部 HDR 贴图，所以在着色器里用解析函数
+     现造一个影棚：主光 + 冷色轮廓光 + 地面反光板 + 暗色环境。
+     漫反射与镜面分开计算 —— 两者的角度衰减规律不同，混在一起必然有一头是错的。 */
+
+  /* 漫反射辐照度：接近余弦的平滑衰减，得到连续的明暗梯度。
+     这里绝不能用"宽平台"型近似（如大范围的 smoothstep）：那会让整个受光面亮度几乎不变，
+     球看起来就是一块平涂色 + 一个贴上去的高光斑，也就是三渲二感。
+     实测旧实现的球面亮度剖面是 166→193→192→190→180→166，几乎是一条直线。 */
+  vec3 diffuseEnv(vec3 n) {
+    vec3 sky = mix(vec3(0.013, 0.015, 0.021), vec3(0.052, 0.060, 0.078), n.y * 0.5 + 0.5);
+    float kd = max(dot(n, KEY_DIR), 0.0);
+    float kr = max(dot(n, RIM_DIR), 0.0);
+    float kf = max(dot(n, FILL_DIR), 0.0);
+    return sky
+         + vec3(1.00, 0.96, 0.91) * 1.95 * pow(kd, 1.35)   // 主光：平滑余弦梯度
+         + vec3(0.58, 0.70, 1.00) * 0.80 * pow(kr, 1.90)   // 轮廓光
+         + vec3(0.84, 0.83, 0.86) * 0.40 * pow(kf, 1.60);  // 地面反光
+  }
+
+  /* 镜面反射：按粗糙度收窄的反射瓣。同样用 pow 而不是 smoothstep ——
+     smoothstep 给出的是"有明确边界的光斑"，在小球上就是一块贴上去的硬高光。 */
+  vec3 specEnv(vec3 r, float rough) {
+    float q = 0.055 + rough;
+    float sh = 1.15 / (q * q);
+    return vec3(1.00, 0.96, 0.91) * 2.35 * pow(max(dot(r, KEY_DIR), 0.0), sh)
+         + vec3(0.58, 0.70, 1.00) * 0.75 * pow(max(dot(r, RIM_DIR), 0.0), sh * 0.65)
+         + vec3(0.020, 0.023, 0.030)
+         + uBgColor * (uBgAmbient * 0.20);      // 背景的环境反射（给球体染上背景色）
+  }
+  /* ACES filmic 色调映射（Narkowicz 近似）：把 HDR 值柔和压回 [0,1]，
+     高光滚降不硬切 —— 这是"电影感 / 高级感"的关键一步 */
+  vec3 acesTone(vec3 x) {
+    return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), 0.0, 1.0);
+  }
+
+  void main() {
+    vec2 uv = gl_PointCoord - 0.5;
+    float rho2 = dot(uv, uv) * 4.0;              // 0 = 球心投影；1 = 轮廓
+    if (rho2 > 1.0) discard;                     // 硬轮廓：杜绝"半透明像素写深度"
+    float nz = sqrt(1.0 - rho2);                 // 球面法线的 z 分量
+    vec3 N = vec3(uv.x * 2.0, -uv.y * 2.0, nz);  // gl_PointCoord 的 y 轴朝下，取反
+    vec3 V = vec3(0.0, 0.0, 1.0);                // 视图空间下指向相机的方向
+    float NoV = clamp(dot(N, V), 1e-4, 1.0);
+
+    float luma = dot(vColor, vec3(0.2126, 0.7152, 0.0722));
+    vec3 albedo = mix(vec3(luma), vColor, uSaturation) * uBright;
+
+    /* 接触阴影：埋在内部的粒子接收到的间接光更少。漫反射全额受遮蔽，
+       镜面只受部分遮蔽（否则密集处的高光会整片消失，球体反而变平）。 */
+    float ao = mix(1.0, vAO, uAOStrength);
+    /* 漫反射：法线方向的辐照度，连续余弦梯度 */
+    vec3 irr = diffuseEnv(N) * uDiffuse * ao;
+    /* 背景作为环境光：一块大面积色板会把光反弹到球体上 ——
+       背景亮，球的暗部就抬起来；背景有色，整颗球会染上那个色。
+       背景是纯黑（默认）时这一项为 0，观感与之前完全一致。 */
+    irr += uBgColor * uBgAmbient * ao;
+    /* 镜面：反射方向上的反射瓣 + Schlick 菲涅尔（电介质 F0 ≈ 0.045） */
+    vec3 R = reflect(-V, N);
+    vec3 pre = specEnv(R, uRough);
+    /* 菲涅尔在掠射角趋于 1，配轮廓光会形成一圈亮边 —— 这是"高级感"的来源，
+       但过强就成了描边。这里把菲涅尔的峰值压到 0.55，保留轮廓、避免描边。 */
+    vec3 F = vec3(0.045) + vec3(0.505) * pow(1.0 - NoV, 5.0);
+    vec3 spec = pre * F * uSpecScale * mix(1.0, 0.55, uRough) * mix(1.0, ao, 0.45);
+
+    vec3 color = acesTone(albedo * irr + spec);
+    /* 实心球的"透明度"：朝背景色淡出，而不是朝黑压暗 ——
+       这样换成浅色背景时，降低透明度依然读作"变透"，而不是"变脏"。 */
+    color = mix(uBgColor, color, mix(1.0, uAlpha, uSolid));
+    float a = mix(uOpacity * uAlpha, 1.0, uSolid);
+    /* 深度用点精灵自身的深度（整颗粒子同一深度），不写 gl_FragDepth。
+       为什么不做"逐像素球面深度"：那会让球与球真实相交，出现一圈圈圆形缺口/火山口，
+       粒子一大就像穿模（实测确实如此）。点云的标准做法是整颗取中心深度 ——
+       近的整颗盖住远的，球体轮廓完整；顺带还能恢复 GPU 的 early-Z 提前剔除。 */
+    gl_FragColor = vec4(color, a);
+  }
+`;
+
+/* 面板「光泽」0~1 → 粗糙度：1 = 镜面（锐利高光），0 = 全哑光 */
+function roughnessFromGloss(g) {
+  const t = Math.max(0, Math.min(1, g));
+  return 0.62 + (0.04 - 0.62) * t;
+}
+
+function makeMaterial() {
+  const solid = params.solid;          // 实心球体：不透明 + 写深度
+  return new THREE.ShaderMaterial({
+    vertexShader: vert,
+    fragmentShader: solid ? fragSphere : fragNormal,
+    uniforms: {
+      uTime: { value: 0 },
+      uProgress: { value: 0 },
+      uSize: { value: 0.3 },
+      uFloatAmp: { value: 0 },
+      uOpacity: { value: 1 },
+      uAlpha: { value: params.opacity },
+      uSolid: { value: solid ? 1 : 0 },
+      uSaturation: { value: 1 },
+      uRough: { value: roughnessFromGloss(params.gloss) },
+      uBright: { value: params.bright },
+      uDiffuse: { value: params.diffuse },
+      uBgColor: { value: bgAmbient },
+      uBgAmbient: { value: params.bgAmbient },
+      uSpecScale: { value: params.specScale },
+      uMediaMode: { value: 0 },
+      uMediaTex: { value: null },
+      uDepthRange: { value: 4 },
+      uNoise: { value: 0.3 },
+      uResScale: { value: 1 },
+      uAOStrength: { value: params.aoStrength },
+      uCoreT: { value: params.coreT },
+    },
+    vertexColors: false,
+    transparent: true,
+    depthWrite: solid,          // 实心球体：写深度 → 近处粒子挡住远处粒子
+    blending: THREE.NormalBlending,
+  });
+}
+
+/* 深度预通道材质：与颜色材质共用同一份 uniform 对象，参数自动同步（无需逐帧拷贝）。
+   transparent:false 让它进"不透明队列"，从而先于透明粒子渲染。 */
+function makeCoreMaterial(shared) {
+  return new THREE.ShaderMaterial({
+    vertexShader: vert,
+    fragmentShader: fragCore,
+    uniforms: shared,
+    transparent: false,
+    depthWrite: true,
+    colorWrite: false,
+    blending: THREE.NoBlending,
+  });
+}
+
+/* 给一个颜色层配一个深度预通道层：共用几何与 uniform 对象，参数自动同步，
+   无需逐帧拷贝。实心球体自己就写深度，故该模式下预通道层隐藏。 */
+function addCoreLayer(body) {
+  const core = new THREE.Points(body.geometry, makeCoreMaterial(body.material.uniforms));
+  core.frustumCulled = false;
+  core.visible = !params.solid;
+  scene.add(core);
+  return core;
+}
+function removeCoreLayer(core) {
+  if (!core) return;
+  scene.remove(core);
+  core.material.dispose();          // 几何与颜色层共享，由颜色层负责销毁
+}
+
+/* 投影相关 uniform：球面逐像素深度要用到投影矩阵与"像素↔世界尺寸"的换算系数。
+   视口尺寸/导出分辨率变化时都要刷新（导出会临时改绘制缓冲尺寸）。 */
+function updateProjUniforms() {
+  const h = renderer.domElement.height;                       // 绘制缓冲高度（已含 pixelRatio）
+  /* 粒子世界尺寸的参考画布高度。取 1800 设备像素 ≈ 一台 Retina 笔记本上 900px 高的窗口，
+     也就是最常见的调参环境：在这个高度下观感与改动前完全一致。 */
+  const resScale = h / AO_REF_HEIGHT;
+  for (const obj of [points, morphLayer]) {
+    if (!obj) continue;
+    const u = obj.material.uniforms;
+    if (u.uResScale) u.uResScale.value = resScale;
+    if (u.uAOStrength) u.uAOStrength.value = params.aoStrength;
+  }
+}
+
+/* ================= 状态 ================= */
+let points = null;          // 主颜色层（THREE.Points）
+let pointsCore = null;      // 主图层的深度预通道层
+let imageData = null;       // { data, width, height }
+let animStart = 0;          // 聚合动画开始时间
+let exporting = false;      // 逐帧渲染导出中（暂停实时循环；在 UI 绑定阶段就要可读）
+const ANIM_DURATION = 1.6;  // 秒
+const params = {
+  count: 20000, size: 0.5, depth: 6.0, noise: 0.3, dist: 0.7,
+  floatAmp: 0.2, bloom: 0, depthMode: 'brightness', autoRotate: false,
+  opacity: 1,                       // 粒子透明度（1 = 不透明）
+  solid: false,                     // true = 实心球体（不透明 + 写深度 → 粒子互相真实遮挡）
+  gloss: 0.5,                       // 球体光泽（已从面板移除，固定 50%）：0 = 全哑光，1 = 镜面
+  bright: 1,                        // 粒子明度倍率
+  sat: 1,                           // 粒子饱和度（1 = 原色，0 = 黑白）
+  diffuse: 0.62,                    // 实心球漫反射强度（光照模型换成连续梯度后重新标定）
+  specScale: 1.55,                  // 实心球镜面强度
+  aoStrength: 1,                    // 接触阴影强度（0 = 关闭，便于对照）
+  coreT: 0.5,                       // 柔和光点核心阈值：越大 → 实心核心越小、柔边越宽
+  bg: '#000000',                    // 背景颜色
+  bgAmbient: 0.85,                  // 背景作为环境光的强度
+  lumMin: 0,                        // 亮度下限：低于此亮度的像素不生成粒子（0~255，默认 0 = 保留纯黑）
+  lumMax: 255,                      // 亮度上限：高于此亮度的像素不生成粒子（默认 255 = 保留纯白）
+  animFrom: -0.2, animTo: 0.9,      // 动态分布的起点/终点分布值。起点不取满 -0.9：
+                                    // 扫到极暗端会把点云摊成稀疏散点，观感上就是流动变暗
+  animSpeed: 0.1,                   // 流动速度倍率
+  animPhase: 0.7,                   // 相位散布（粒子带宽度），可调：小=分布精确，大=粒子流绵密
+};
+
+const AO_REF_HEIGHT = 1800;      // 粒子世界尺寸的参考画布高度（设备像素）
+let AO_RADIUS_MULT = 5.5;        // 搜索半径 = 该倍数 × 平均间距（越大 → 梯度越平滑、越像体积遮蔽）
+const AO_STRENGTH = 0.70;        // 最密处压暗到 1 - 该值
+
+/* 参数设计默认值的快照：必须在网址覆盖与"换图自动判定"之前取，
+   滑块上的重置按钮才能回到设计默认而不是被改过的值 */
+const PARAM_DEFAULTS = Object.assign({}, params);
+
+/* URL 参数覆盖（测试/复现用，如 ?test&dist=-0.5&settle=1）：在 UI 绑定前生效 */
+window.__PC_SETTLE = false;
+window.__PC_WANT_STATS = false;
+window.__PC_RANDTEST = false;
+(function applyUrlParams() {
+  const q = new URLSearchParams(location.search);
+  const d = parseFloat(q.get('dist'));
+  if (!isNaN(d)) { params.dist = Math.max(-1, Math.min(1, d)); window.__PC_DIST_FIXED = true; }
+  const af = parseFloat(q.get('animFrom'));
+  if (!isNaN(af)) params.animFrom = Math.max(-1, Math.min(1, af));
+  const at = parseFloat(q.get('animTo'));
+  if (!isNaN(at)) params.animTo = Math.max(-1, Math.min(1, at));
+  const lm = parseFloat(q.get('lumMin'));
+  if (!isNaN(lm)) { params.lumMin = Math.max(0, Math.min(255, lm)); window.__PC_LUM_FIXED = true; }
+  const lx = parseFloat(q.get('lumMax'));
+  if (!isNaN(lx)) { params.lumMax = Math.max(0, Math.min(255, lx)); window.__PC_LUM_FIXED = true; }
+  const sp = parseFloat(q.get('animSpeed'));
+  if (!isNaN(sp)) params.animSpeed = Math.max(0.1, Math.min(3, sp));
+  const ap = parseFloat(q.get('animPhase'));
+  if (!isNaN(ap)) params.animPhase = Math.max(0, Math.min(0.7, ap));
+  const bl = parseFloat(q.get('bloom'));
+  if (!isNaN(bl)) { params.bloom = Math.max(0, Math.min(2.5, bl)); bloomPass.strength = params.bloom; bloomPass.enabled = params.bloom > 0.001; }
+  const sz = parseFloat(q.get('size'));
+  if (!isNaN(sz)) params.size = Math.max(0.1, Math.min(2, sz));
+  const ct = parseFloat(q.get('count'));
+  if (!isNaN(ct)) params.count = Math.max(20000, Math.min(300000, ct));
+  const ns = parseFloat(q.get('noise'));
+  if (!isNaN(ns)) params.noise = Math.max(0, Math.min(2, ns));
+  const op = parseFloat(q.get('opacity'));
+  if (!isNaN(op)) params.opacity = Math.max(0.05, Math.min(1, op));
+  const brt = parseFloat(q.get('bright'));
+  if (!isNaN(brt)) params.bright = Math.max(0.2, Math.min(2.5, brt));
+  const stq = parseFloat(q.get('sat'));
+  if (!isNaN(stq)) params.sat = Math.max(0, Math.min(2, stq));
+  if (q.get('solid') === '1' || q.get('occlude') === '1') { params.solid = true; window.__PC_FORM_FIXED = true; }
+  if (q.get('solid') === '0') window.__PC_FORM_FIXED = true;
+  /* 测试用：标定球体光照的调参入口（不出现在面板上） */
+  const gl_ = parseFloat(q.get('gloss'));
+  if (!isNaN(gl_)) params.gloss = Math.max(0, Math.min(1, gl_));
+  const df = parseFloat(q.get('diffuse'));
+  if (!isNaN(df)) params.diffuse = Math.max(0, Math.min(2, df));
+  const sps = parseFloat(q.get('spec'));
+  if (!isNaN(sps)) params.specScale = Math.max(0, Math.min(4, sps));
+  const aos = parseFloat(q.get('ao'));
+  if (!isNaN(aos)) params.aoStrength = Math.max(0, Math.min(1, aos));
+  const aor = parseFloat(q.get('aorad'));
+  if (!isNaN(aor)) AO_RADIUS_MULT = Math.max(1, Math.min(20, aor));
+  const bgq = q.get('bg');
+  if (bgq && /^[0-9a-fA-F]{6}$/.test(bgq)) params.bg = '#' + bgq;
+  const bga = parseFloat(q.get('bgamb'));
+  if (!isNaN(bga)) params.bgAmbient = Math.max(0, Math.min(3, bga));
+  if (q.get('bgauto') === '0') window.__PC_NO_BGAUTO = true;   // 测试用：关掉自动取色
+  const crt = parseFloat(q.get('coret'));
+  if (!isNaN(crt)) params.coreT = Math.max(0.02, Math.min(0.9, crt));
+  if (q.get('nocore') === '1') window.__PC_NOCORE = true;   // 测试用：关掉深度预通道做对照
+  if (q.get('autorotate') === '1') {         // 测试用：覆盖默认的关闭状态
+    params.autoRotate = true;
+    controls.autoRotate = true;
+  }
+  if (q.get('settle') === '1') {           // 测试用：跳过聚合动画 + 关闭自动旋转
+    window.__PC_SETTLE = true;
+    controls.autoRotate = false;
+  }
+  if (q.get('stats') === '1') window.__PC_WANT_STATS = true;  // 测试用：输出采样统计
+  if (q.get('noflow') === '1') window.__PC_NO_AUTOFLOW = true; // 测试用：不自动开启流动动画
+  if (q.get('randtest') === '1') window.__PC_RANDTEST = true; // 测试用：纯随机粒子场
+  if (q.get('nopost') === '1') window.__PC_NOPOST = true;     // 测试用：绕过辉光后处理直接渲染
+})();
+
+/* ================= 采样与重建 ================= */
+
+/* sRGB → 线性。图片像素是 sRGB 编码的，而渲染管线（composer 末尾的 OutputPass）会把着色器
+   输出当作线性色再编码成 sRGB，所以送进着色器之前必须先解码，否则整条链路多编码一次
+   （double gamma）：128 的灰会被渲染成 187，画面发灰、对比度变低。 */
+function srgbToLinear(c) {
+  c = c < 0 ? 0 : (c > 1 ? 1 : c);
+  return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+}
+
+/* ================= 接触阴影 / 环境光遮蔽（AO）烘焙 =================
+   统计每颗粒子周围的邻近密度：越"埋在内部"的粒子接收到的环境光越少。
+   有了它，一堆球才会读成一坨实体，而不是一堆各自独立打光的浮球——
+   这是让点云产生体积感最关键的一步（纯实时光照无法负担真正的光线遮蔽）。
+
+   做法：均匀网格 + 计数排序（O(n)），对每颗粒子扫周围 27 个格子，
+   按 (1 - d/R)² 权重累加邻近度 occ —— 该权重在球内的平均值为 0.1，
+   正好等于 0.1 × 球内邻居数，物理含义清晰。
+   半径 R 由"包围盒体积均分给 n 颗粒子"推出的平均间距决定，因此自适应各种点云形状。
+
+   注意：这是"密度型 AO"，不是严格的几何接触阴影（后者要求 R 绑定粒子半径，
+   而粒子半径随「粒子大小」滑块变化，烘焙结果会失效）。密度型 AO 给出的是
+   内部暗、表层亮的体积梯度，这才是肉眼感知"实体感"的主要来源。 */
+
+/* AO 只在实心球体模式下用得到：柔和光点的片元着色器不读 aAO。
+   默认模式因此不为烘焙付代价；切到球体时再按需烘焙（见 rebuildMaterials）。
+
+   ---- 为什么要分片 ----
+   逐粒子扫周围 27 个格子，邻居数由搜索半径决定（默认 AO_RADIUS_MULT = 5.5 时约 700 个/粒子），
+   代价因此正比于粒子数：实测 20k → 0.6s、50k → 2.6s、100k → 4.4s、200k → 10.3s、300k → 17.8s。
+   原实现整段同步执行，这十几秒里主线程完全冻住（切形态、换图、拖滑块都会中招）。
+   拆成「准备 → 分片累加 → 归一化」三步后，累加阶段每片最多占用主线程 AO_SLICE_MS 毫秒就让出，
+   页面全程可响应、进度提示也能一直画着。
+   分片**不改变结果**（每颗粒子的累加彼此独立），所以画面与改动前逐像素一致。 */
+const AO_SLICE_MS = 5;      // 每片最多占用主线程多久
+const AO_CHUNK = 1024;      // 每片的粒子数下限（避免每颗粒子都去读一次时钟）
+
+/* 第一步：包围盒 → 搜索半径 → 均匀网格 + 计数排序（O(n)）。返回后续阶段共用的状态。 */
+function aoPrepare(pos, n) {
+  if (n < 16) return null;
+  let mnX = Infinity, mnY = Infinity, mnZ = Infinity;
+  let mxX = -Infinity, mxY = -Infinity, mxZ = -Infinity;
+  for (let i = 0; i < n; i++) {
+    const x = pos[i * 3], y = pos[i * 3 + 1], z = pos[i * 3 + 2];
+    if (x < mnX) mnX = x; if (x > mxX) mxX = x;
+    if (y < mnY) mnY = y; if (y > mxY) mxY = y;
+    if (z < mnZ) mnZ = z; if (z > mxZ) mxZ = z;
+  }
+  const vol = Math.max(1e-6, (mxX - mnX) * (mxY - mnY) * (mxZ - mnZ));
+  let R = AO_RADIUS_MULT * Math.pow(vol / n, 1 / 3);
+  let nx = Math.max(1, Math.ceil((mxX - mnX) / R) + 1);
+  let ny = Math.max(1, Math.ceil((mxY - mnY) / R) + 1);
+  let nz = Math.max(1, Math.ceil((mxZ - mnZ) / R) + 1);
+  /* 极端参数下网格可能过大：放大半径直到格子数可控 */
+  let guard = 0;
+  while (nx * ny * nz > 4000000 && guard++ < 24) {
+    R *= 1.5;
+    nx = Math.max(1, Math.ceil((mxX - mnX) / R) + 1);
+    ny = Math.max(1, Math.ceil((mxY - mnY) / R) + 1);
+    nz = Math.max(1, Math.ceil((mxZ - mnZ) / R) + 1);
+  }
+  const cells = nx * ny * nz;
+  const cellOf = new Int32Array(n);
+  const start = new Int32Array(cells + 1);
+  for (let i = 0; i < n; i++) {
+    const gx = Math.min(nx - 1, ((pos[i * 3] - mnX) / R) | 0);
+    const gy = Math.min(ny - 1, ((pos[i * 3 + 1] - mnY) / R) | 0);
+    const gz = Math.min(nz - 1, ((pos[i * 3 + 2] - mnZ) / R) | 0);
+    const c = (gz * ny + gy) * nx + gx;
+    cellOf[i] = c;
+    start[c + 1]++;
+  }
+  for (let c = 0; c < cells; c++) start[c + 1] += start[c];
+  const cursor = start.slice(0, cells);
+  const order = new Int32Array(n);
+  for (let i = 0; i < n; i++) order[cursor[cellOf[i]]++] = i;
+  return { n, nx, ny, nz, mnX, mnY, mnZ, R, r2: R * R, invR: 1 / R,
+           start, order, occ: new Float32Array(n) };
+}
+
+/* 第二步：累加 [i0, i1) 这颗粒子的邻域占用度。热点，由分片驱动反复调用。 */
+function aoAccumulate(st, pos, i0, i1) {
+  const { nx, ny, nz, mnX, mnY, mnZ, R, r2, invR, start, order, occ } = st;
+  for (let i = i0; i < i1; i++) {
+    const xi = pos[i * 3], yi = pos[i * 3 + 1], zi = pos[i * 3 + 2];
+    const gx = Math.min(nx - 1, ((xi - mnX) / R) | 0);
+    const gy = Math.min(ny - 1, ((yi - mnY) / R) | 0);
+    const gz = Math.min(nz - 1, ((zi - mnZ) / R) | 0);
+    let acc = 0;
+    for (let dz = -1; dz <= 1; dz++) {
+      const cz = gz + dz; if (cz < 0 || cz >= nz) continue;
+      for (let dy = -1; dy <= 1; dy++) {
+        const cy = gy + dy; if (cy < 0 || cy >= ny) continue;
+        for (let dx = -1; dx <= 1; dx++) {
+          const cx = gx + dx; if (cx < 0 || cx >= nx) continue;
+          const c = (cz * ny + cy) * nx + cx;
+          for (let k = start[c]; k < start[c + 1]; k++) {
+            const j = order[k];
+            if (j === i) continue;
+            const ex = pos[j * 3] - xi, ey = pos[j * 3 + 1] - yi, ez = pos[j * 3 + 2] - zi;
+            const d2 = ex * ex + ey * ey + ez * ez;
+            if (d2 >= r2) continue;
+            const w = 1 - Math.sqrt(d2) * invR;
+            acc += w * w;
+          }
+        }
+      }
+    }
+    occ[i] = acc;
+  }
+}
+
+/* 第三步：归一化。以 occ 的 85 分位为"最密"参考，表层粒子接近 1、内部粒子压暗。
+   用分位数而不是绝对阈值，可自适应任意点云形状与数量。 */
+function aoFinalize(st) {
+  const { n, occ } = st;
+  const ao = new Float32Array(n);
+  const sample = [];
+  const step = Math.max(1, Math.floor(n / 4000));
+  for (let i = 0; i < n; i += step) sample.push(occ[i]);
+  sample.sort((a, b) => a - b);
+  const ref = Math.max(1e-6, sample[Math.floor(sample.length * 0.85)]);
+  for (let i = 0; i < n; i++) {
+    const t = Math.min(1, occ[i] / ref);
+    ao[i] = 1 - AO_STRENGTH * t;
+  }
+  return ao;
+}
+
+/* 分片驱动。isCancelled 为真时（被更新的一次重建取代）交回 null，调用方据此丢弃结果 ——
+   注意必须回调，否则 await 会永远挂住、等待提示也收不起来。 */
+function bakeAOChunked(pos, n, onDone, isCancelled) {
+  const st = aoPrepare(pos, n);
+  if (!st) { onDone(new Float32Array(n).fill(1)); return; }
+  let i = 0;
+  const step = () => {
+    if (isCancelled && isCancelled()) { onDone(null); return; }
+    const t0 = performance.now();
+    do {
+      const end = Math.min(n, i + AO_CHUNK);
+      aoAccumulate(st, pos, i, end);
+      i = end;
+    } while (i < n && performance.now() - t0 < AO_SLICE_MS);
+    if (i < n) setTimeout(step, 0);
+    else onDone(aoFinalize(st));
+  };
+  step();
+}
+
+/* 实心球体才需要烘焙；柔和光点直接给全 1（片元着色器不读 aAO） */
+function aoForPositions(positions, n, isCancelled) {
+  if (!params.solid) return Promise.resolve(new Float32Array(n).fill(1));
+  return new Promise(resolve => bakeAOChunked(positions, n, resolve, isCancelled));
+}
+
+/* 分布权重：dist ∈ [-1,1]，正 = 亮部聚集（亮度^p），负 = 暗部聚集（(1-亮度)^p），0 = 均匀 */
+const WEIGHT_FLOOR = 0.02;   // 分布权重的保底值（见下方说明）
+const AUTO_DIST_THRESHOLD = 140;   // 背景亮度高于此值 → 分布偏向默认 0（亮背景），否则 0.7（暗背景）
+function luminanceWeight(L, dist, minL, maxL) {
+  if (dist > 0.999) return L >= maxL ? 1 : 0;    // 极限：只留最亮像素
+  if (dist < -0.999) return L <= minL ? 1 : 0;   // 极限：只留最暗像素
+  const l = L / 255;
+  const t = Math.abs(dist);
+  const p = 0.4 * t / (1 - t);                   // 幂指数：越接近 ±1 聚集越强（0.7 → 0.93）
+                                                 // 系数 0.4：降低陡峭度，减少对图像微纹理的放大
+  /* 保底权重：最暗/最亮的桶也保留 2% 的相对权重。
+     没有这一项时"分布偏向"会退化成"硬性删除"——纯黑像素（L=0）的权重恒为 0，
+     即使把亮度下限设成 0 也一颗都留不下。这样分工才清楚：
+     亮度上/下限 = 硬性过滤（删或留），分布偏向 = 软性权重（多或少）。 */
+  return WEIGHT_FLOOR + (1 - WEIGHT_FLOOR) * Math.pow(dist > 0 ? l : 1 - l, p);
+}
+
+/* 预扫描：亮度直方图 + 按亮度分桶的像素索引（全图所有有效像素，无网格降采样——
+   粒子的位置与颜色都从连续图像空间采样，任何密度下都不出现网格模式）。
+   同一张图多次采样（静态重建、动态多关键帧）时共享，避免重复全图扫描 */
+function prepareScan() {
+  if (!imageData) return null;
+  const { data, width: w, height: h } = imageData;
+
+  const worldW = 10;
+  const scale = worldW / w;
+  const depthRange = params.depth * 2;
+  const stride = 1;                       // 全像素扫描（亚像素抖动基准）
+
+  /* 平滑亮度场（5×5 高斯分离核）：权重曲线是陡峭的幂函数，图像的微小亮度起伏
+     （JPEG 8×8 块伪影、细纹理）会被它指数放大成粒子密度网格；先大幅平滑亮度，
+     让粒子密度只跟随大的明暗结构 */
+  const Lf = new Float32Array(w * h);
+  for (let i = 0, p = 0; i < w * h; i++, p += 4) {
+    Lf[i] = 0.299 * data[p] + 0.587 * data[p + 1] + 0.114 * data[p + 2];
+  }
+  const KERN = [1, 4, 6, 4, 1], KSUM = 16;
+  const T = new Float32Array(w * h);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = y * w + x;
+      let s = 0;
+      for (let k = -2; k <= 2; k++) {
+        s += KERN[k + 2] * Lf[y * w + Math.max(0, Math.min(w - 1, x + k))];
+      }
+      T[i] = s / KSUM;
+    }
+  }
+  const Ls = new Float32Array(w * h);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = y * w + x;
+      let s = 0;
+      for (let k = -2; k <= 2; k++) {
+        s += KERN[k + 2] * T[Math.max(0, Math.min(h - 1, y + k)) * w + x];
+      }
+      Ls[i] = s / KSUM;
+    }
+  }
+
+  /* 亮度带通：下限默认 0（保留纯黑粒子）、上限默认 255（保留纯白）；
+     写反了也不报错，自动取小值为下限 */
+  const lmin = Number.isFinite(params.lumMin) ? params.lumMin : 0;
+  const lmax = Number.isFinite(params.lumMax) ? params.lumMax : 255;
+  const lumLo = Math.min(lmin, lmax);
+  const lumHi = Math.max(lmin, lmax);
+
+  /* -- 第一遍：亮度直方图（全部有效像素，用平滑亮度） -- */
+  const BINS = 256;
+  const hist = new Uint32Array(BINS);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = (y * w + x) * 4;
+      if (data[i + 3] < 10) continue;             // 跳过透明像素
+      const L = Ls[y * w + x] | 0;
+      if (L < lumLo || L > lumHi) continue;       // 亮度带通：上下限之外都不生成粒子
+      hist[L]++;
+    }
+  }
+  let valid = 0, minL = BINS - 1, maxL = 0;
+  for (let L = 0; L < BINS; L++) {
+    if (!hist[L]) continue;
+    valid += hist[L];
+    if (L < minL) minL = L;
+    if (L > maxL) maxL = L;
+  }
+  if (!valid) return null;
+
+  /* -- 第二遍：按亮度等级紧凑收集像素索引，供加权抽取 -- */
+  const offsets = new Uint32Array(BINS + 1);
+  let acc = 0;
+  for (let L = 0; L < BINS; L++) { offsets[L] = acc; acc += hist[L]; }
+  offsets[BINS] = acc;
+  const pool = new Uint32Array(valid);            // 存 y * w + x
+  const cursor = new Uint32Array(BINS);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = (y * w + x) * 4;
+      if (data[i + 3] < 10) continue;
+      const L = Ls[y * w + x] | 0;
+      if (L < lumLo || L > lumHi) continue;
+      pool[offsets[L] + cursor[L]++] = y * w + x;
+    }
+  }
+  return { data, w, h, scale, depthRange, stride, hist, offsets, pool, valid, minL, maxL };
+}
+
+/* 从预扫描结果按给定 dist 加权采样 params.count 个粒子（允许重复） */
+function sampleFromScan(scan, dist) {
+  /* 测试模式：纯随机粒子场（位置/颜色全随机），用于定位网格来源 */
+  if (window.__PC_RANDTEST) {
+    const n = params.count;
+    const positions = new Float32Array(n * 3);
+    const colors = new Float32Array(n * 3);
+    const randoms = new Float32Array(n * 3);
+    for (let i = 0, o = 0; i < n; i++, o += 3) {
+      positions[o] = (Math.random() - 0.5) * 10;
+      positions[o + 1] = (Math.random() - 0.5) * 5.6;
+      positions[o + 2] = (Math.random() - 0.5) * 4;
+      const L = Math.random();
+      colors[o] = L; colors[o + 1] = L; colors[o + 2] = L;
+      randoms[o] = Math.random(); randoms[o + 1] = Math.random(); randoms[o + 2] = Math.random();
+    }
+    return { positions, colors, randoms };
+  }
+  const { data, w, h, scale, depthRange, stride, hist, offsets, pool, minL, maxL } = scan;
+  const BINS = 256;
+  const cum = new Float64Array(BINS);
+  let total = 0;
+  for (let L = 0; L < BINS; L++) {
+    total += luminanceWeight(L, dist, minL, maxL) * hist[L];
+    cum[L] = total;
+  }
+
+  const n = params.count;
+  const positions = new Float32Array(n * 3);
+  const colors = new Float32Array(n * 3);
+  const randoms = new Float32Array(n * 3);
+  for (let k = 0, o = 0; k < n; k++, o += 3) {
+    const target = Math.random() * total;
+    let lo = 0, hi = BINS - 1;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (cum[mid] < target) lo = mid + 1; else hi = mid;
+    }
+    const L = lo;
+    const p = pool[offsets[L] + (Math.random() * hist[L] | 0)];
+    const x = p % w, y = (p / w) | 0;
+    const i = p * 4;
+    /* 位置抖动 ±2px：随机模糊粒子密度场的细纹理（图像 7~12px 纹理被位置噪声打散），
+       大尺度明暗结构（>20px）不受影响 */
+    const jx = (Math.random() - 0.5) * 12;
+    const jy = (Math.random() - 0.5) * 12;
+
+    let z;
+    if (params.depthMode === 'brightness') {
+      /* 深度方向固定为"亮 → 近"：亮部朝相机（+z），暗部后退 */
+      z = (L / 255 - 0.5) * depthRange;
+      z += (Math.random() - 0.5) * params.noise;  // 体积噪声
+    } else {
+      z = (Math.random() - 0.5) * depthRange;
+    }
+
+    positions[o]     = (x + 0.5 + jx - w / 2) * scale;
+    positions[o + 1] = -(y + 0.5 + jy - h / 2) * scale;
+    positions[o + 2] = z;
+    /* 颜色微扰 ±2%：同一像素被重复抽取时，粒子颜色略有差异，柔化同色团块。
+       注意必须先 sRGB → 线性：渲染管线的 OutputPass 会把着色器输出当线性色再编码成 sRGB，
+       若这里直接用原图的 sRGB 值，就会 double gamma（128 的灰被渲染成 187）→ 整体发灰发白。 */
+    colors[o]     = Math.min(1, Math.max(0, srgbToLinear(data[i] / 255 + (Math.random() - 0.5) * 0.04)));
+    colors[o + 1] = Math.min(1, Math.max(0, srgbToLinear(data[i + 1] / 255 + (Math.random() - 0.5) * 0.04)));
+    colors[o + 2] = Math.min(1, Math.max(0, srgbToLinear(data[i + 2] / 255 + (Math.random() - 0.5) * 0.04)));
+    randoms[o]     = Math.random();
+    randoms[o + 1] = Math.random();
+    randoms[o + 2] = Math.random();
+  }
+  return { positions, colors, randoms };
+}
+
+/* 按 params.dist 加权采样一批粒子 */
+function samplePoints() {
+  const scan = prepareScan();
+  return scan ? sampleFromScan(scan, params.dist) : null;
+}
+
+/* 重建令牌：AO 分片烘焙期间用户可能又改了一次参数 → 旧的一次结果作废，避免两轮烘焙并行抢主线程 */
+let buildToken = 0;
+async function buildPoints() {
+  if (!imageData) return;
+  const token = ++buildToken;
+  if (animState) exitAnimIfActive();   // 动态分布运行中 → 复位到静态状态
+  clearAnimLayers();                   // 采样参数将变化 → 关键帧缓存作废
+
+  const s = samplePoints();
+  if (!s) {
+    infoState = { kind: 'none' };
+    renderInfo();
+    return;
+  }
+  const { positions, colors, randoms } = s;
+  /* 接触阴影只在这里烘焙一次。注意不能放进 sampleFromScan —— 流动动画的 19 个关键帧
+     都会调用它，那样会把 AO 白烘 19 遍（实测让轨迹构建从 2.2s 涨到 6s 以上）。
+     烘焙是分片的（见 aoForPositions），期间会让出主线程，所以这里必须 await。 */
+  const ao = await aoForPositions(positions, params.count, () => token !== buildToken);
+  if (!ao) return;                     // 已被更新的一次重建取代，交给它收尾
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+  geo.setAttribute('aRandom', new THREE.Float32BufferAttribute(randoms, 3));
+  geo.setAttribute('aAO', new THREE.Float32BufferAttribute(ao, 1));   // 烘焙的接触阴影
+  geo.setAttribute('aUV', new THREE.Float32BufferAttribute(new Float32Array(positions.length / 3 * 2), 2));  // 图片模式不用
+
+  const mat = makeMaterial();
+  mat.uniforms.uSize.value = params.size;
+  mat.uniforms.uFloatAmp.value = params.floatAmp;
+  mat.uniforms.uOpacity.value = 1;
+
+  if (points) { removeCoreLayer(pointsCore); points.geometry.dispose(); points.material.dispose(); scene.remove(points); }
+  points = new THREE.Points(geo, mat);
+  points.frustumCulled = false;
+  scene.add(points);
+  pointsCore = addCoreLayer(points);
+  animStart = (window.__PC_SETTLE ? -10 : performance.now() / 1000);  // settle：动画直接完成
+
+  infoState = { kind: 'image', w: imageData.width, h: imageData.height, n: positions.length / 3 | 0 };
+  renderInfo();
+
+  /* 测试钩子：?stats=1 时把采样结果暴露给自动化测试 */
+  if (window.__PC_WANT_STATS) {
+    const n = positions.length / 3;
+    let sumL = 0, sumX = 0, sumY = 0;
+    for (let k = 0; k < n; k++) {
+      sumL += 0.299 * colors[k * 3] + 0.587 * colors[k * 3 + 1] + 0.114 * colors[k * 3 + 2];
+      sumX += positions[k * 3];
+      sumY += positions[k * 3 + 1];
+    }
+    window.__PC_STATS = { n, avgL: sumL / n, avgX: sumX / n, avgY: sumY / n, dist: params.dist };
+    /* 额外：前 4000 个粒子的屏幕投影位置（诊断网格来源用） */
+    const f = (innerHeight / 2) / Math.tan(25 * Math.PI / 180);
+    const px = new Float32Array(Math.min(4000, n) * 2);
+    for (let k = 0; k < px.length / 2; k++) {
+      const x = positions[k * 3], y = positions[k * 3 + 1], z = positions[k * 3 + 2];
+      px[k * 2]     = innerWidth / 2 + x * f / (8.5 - z);
+      px[k * 2 + 1] = innerHeight / 2 - y * f / (8.5 - z);
+    }
+    window.__PC_PX = Array.from(px);
+  }
+}
+
+/* ================= 动态分布动画（沿明度轨迹连续流动） =================
+   生成期为每个粒子算出一条经过各中间分布（-0.9 → -0.8 → … → 0.9）的完整轨迹
+   （链式就近配对逐帧传播），播放期每帧 CPU 沿轨迹做 Catmull-Rom 平滑插值——
+   一条连续路径、无分段节拍，明度逐级渐变 */
+const ANIM_MORPH_DUR = 8;        // 单程基准时长（秒），实际 = 基准 / 速度倍率
+/* 流动层的亮度补偿：流动动画会把同一个分布重新采样并沿轨迹铺开，粒子之间的
+   重叠比静态时少得多；而柔和光点靠叠加增亮，重叠一少整片就明显变暗
+   （实测用默认素材时覆盖率降到 0.64x、平均亮度 0.69x，肉眼观感更明显）。
+   这里在流动期间给该层一个亮度补偿，让动画的明度与静态观感一致。
+   只作用于颜色、不影响 alpha 与遮挡核心（核心用的是顶点里的 vBright）。 */
+const FLOW_BRIGHT_BOOST = 1.5;
+const ANIM_Z_FOG = 0.35;         // 轨迹深度雾化（世界单位）：粒子在 z 上散开，
+                                 // 透视下打散规则的 2D 条带图案，形成雾状体积
+const ANIM_BEND = 0.35;          // 轨迹弯曲幅度（世界单位）：每粒子独立 S 形弯曲，
+                                 // 打破平行流线形成的规则格状图案
+/* 动态分布按钮文案随语言与状态走：见 setMediaUI / beginAnimLoop / applyLang */
+const fmtDist = v => (v > 0 ? '+' : '') + v.toFixed(2);
+
+let morphLayer = null;     // 流动图层（THREE.Points），null = 未生成
+let morphCore = null;      // 流动图层的深度预通道层
+let animState = null;      // { startedAt } 运行中才有值
+let preAnimDist = 0.7;     // 开启动画前的 dist，退出时恢复
+let animBuildToken = 0;    // 令进行中的异步生成作废的令牌
+let morphPath = null;      // 每粒子轨迹数组：n × K × 6（x,y,z,r,g,b）
+let morphPhase = null;     // 每粒子相位（Float32Array）
+let morphK = 0;            // 轨迹关键帧数（默认 19）
+let morphCount = 0;        // 粒子数
+
+/* 更新单个图层的通用 uniform（时间、聚合进度） */
+function applyLayerUniforms(obj, t, progress) {
+  obj.material.uniforms.uTime.value = t;
+  obj.material.uniforms.uProgress.value = progress;
+}
+
+/* 把 uniform 应用到主层与流动层（粒子大小、漂浮幅度等）。
+   柔和光点与实心球体的 uniform 集合不同（如 uRough 只存在于球体），故按键是否存在判断。 */
+function setAllLayersUniform(key, value) {
+  for (const obj of [points, morphLayer]) {
+    if (obj && obj.material.uniforms[key]) obj.material.uniforms[key].value = value;
+  }
+}
+
+/* 透明度 / 粒子形态：直接改现有材质的 uniform 与 depthWrite，无需重建粒子（动画不中断）。
+   depthWrite 在 three.js 里每帧由 state.setMaterial 读取，改属性即可立即生效。 */
+function applyOverlapUniforms() {
+  for (const obj of [points, morphLayer]) {
+    if (!obj) continue;
+    obj.material.uniforms.uAlpha.value = params.opacity;
+    if (obj.material.uniforms.uCoreT) obj.material.uniforms.uCoreT.value = params.coreT;
+  }
+  syncOcclusionDepth();
+  updateProjUniforms();
+}
+
+/* 切换粒子形态只需换材质（片元着色器变体不同），不必重新采样粒子：
+   把旧材质的全部 uniform 值原样搬到新材质，粒子的位置 / 颜色 / 动画进度都不受影响。 */
+async function rebuildMaterials() {
+  /* 从柔和光点切到实心球体时，几何里的 aAO 还是占位的 1（构建时按模式跳过烘焙），
+     这里按需补烘一次，避免切过去之后所有粒子都是"无遮蔽"的平光。
+     烘焙是分片的 → await，期间页面保持可响应（提示胶囊也一直画着）。 */
+  if (params.solid && points && points.geometry) {
+    const pa = points.geometry.getAttribute('position');
+    if (pa) {
+      const ao = await aoForPositions(pa.array, pa.count);
+      if (ao) points.geometry.setAttribute('aAO', new THREE.Float32BufferAttribute(ao, 1));
+    }
+  }
+  for (const obj of [points, morphLayer]) {
+    if (!obj) continue;
+    const old = obj.material;
+    const mat = makeMaterial();
+    for (const k in mat.uniforms) {
+      if (old.uniforms[k] !== undefined) mat.uniforms[k].value = old.uniforms[k].value;
+    }
+    obj.material = mat;
+    old.dispose();
+  }
+  updateProjUniforms();
+  syncOcclusionDepth();
+}
+
+/* 实心球体模式下"哪些图层写深度、要不要做成不透明"。
+   注意：用户透明度 uAlpha 不参与判断 —— 实心球始终不透明，uAlpha 改为压暗 RGB
+   （背景是纯黑，观感等同变透明），这样"调透明度"不会重新引入黑边。
+   但图层交叉淡化用的 uOpacity 必须参与：流动动画开头 0.4s 内主层淡出、流动层淡入，
+   两层都是半透明的，此时若还写深度，先画的旧层会把新层挡掉，淡入淡出就废了。 */
+function syncOcclusionDepth() {
+  for (const obj of [points, morphLayer]) {
+    if (!obj) continue;
+    const u = obj.material.uniforms;
+    const full = u.uOpacity.value > 0.99;
+    /* uSolid = 1 表示"本图层完全在场"：
+       实心球体据此输出不透明球并写深度；柔和光点据此把核心强制为不透明，
+       并由深度预通道写深度（两者都必须"写深度的像素 = 完全不透明"）。 */
+    if (u.uSolid) u.uSolid.value = full ? 1 : 0;
+    obj.material.depthWrite = params.solid && full;
+  }
+}
+
+/* 销毁流动图层与缓存，并复位动画按钮 */
+function clearAnimLayers() {
+  animBuildToken++;
+  if (morphLayer) {
+    removeCoreLayer(morphCore);
+    morphCore = null;
+    scene.remove(morphLayer);
+    morphLayer.geometry.dispose();
+    morphLayer.material.dispose();
+    morphLayer = null;
+  }
+  const btn = $('btnAnim');
+  if (btn) { btn.textContent = tr('btnAnimIdle'); btn.classList.remove('active'); btn.disabled = false; }
+}
+
+/* 复位动态分布的运行状态与 UI（不销毁缓存、不重建主层） */
+function exitAnimIfActive() {
+  if (!animState) return;
+  animState = null;
+  params.dist = preAnimDist;
+  if (morphLayer) morphLayer.visible = false;
+  if (points) { points.visible = true; points.material.uniforms.uOpacity.value = 1; }
+  const el = $('dist');
+  el.disabled = false;
+  el.value = String(params.dist);
+  $('vDist').textContent = fmtDist(params.dist);
+  const btn = $('btnAnim');
+  btn.textContent = tr('btnAnimIdle');
+  btn.classList.remove('active');
+}
+
+/* 用户主动停止：复位到静态（主层本就是开启前的分布，无需重建；
+   流动轨迹缓存保留，再次开启立即播放） */
+function stopAnim() {
+  if (!animState) return;
+  exitAnimIfActive();
+}
+
+/* ---- 就近配对（最小位移）：A 按空间网格分桶，逐桶从最近外壳收集未占用 B 并排序分配。
+        粒子各自移动到最近的目标 → 视觉上是"就近迁移"而非随机换位；
+        桶级批处理把代价从 O(n²) 降到约 O(n log n) ---- */
+const ANIM_GRID_CELL = 0.7;
+let ANIM_SHELLS = null;
+function animShells(maxR) {
+  if (ANIM_SHELLS) return ANIM_SHELLS;
+  ANIM_SHELLS = [];
+  for (let r = 0; r <= maxR; r++) {
+    const offs = [];
+    for (let dz = -r; dz <= r; dz++) {
+      for (let dy = -r; dy <= r; dy++) {
+        for (let dx = -r; dx <= r; dx++) {
+          if (Math.max(Math.abs(dx), Math.abs(dy), Math.abs(dz)) !== r) continue;  // 只取外壳
+          offs.push(dx, dy, dz);
+        }
+      }
+    }
+    ANIM_SHELLS.push(offs);
+  }
+  return ANIM_SHELLS;
+}
+
+function matchNearestPairs(A, B) {
+  const n = A.length / 3, m = B.length / 3;
+  const cell = ANIM_GRID_CELL;
+  const key = (gx, gy, gz) => (((gx + 64) << 16) | ((gy + 64) << 8) | (gz + 64)) >>> 0;
+  const gi = v => Math.floor(v / cell);
+
+  /* B 的空间哈希网格 */
+  const gridB = new Map();
+  for (let i = 0; i < m; i++) {
+    const k = key(gi(B[i * 3]), gi(B[i * 3 + 1]), gi(B[i * 3 + 2]));
+    let arr = gridB.get(k);
+    if (!arr) gridB.set(k, arr = []);
+    arr.push(i);
+  }
+  /* A 按格子分桶（同格粒子位置几乎相同，可批量配对） */
+  const gridA = new Map();
+  for (let i = 0; i < n; i++) {
+    const k = key(gi(A[i * 3]), gi(A[i * 3 + 1]), gi(A[i * 3 + 2]));
+    let arr = gridA.get(k);
+    if (!arr) gridA.set(k, arr = []);
+    arr.push(i);
+  }
+
+  const used = new Uint8Array(m);
+  const pairs = new Int32Array(n);
+  const shells = animShells(20);      // 20 × 0.7 = 14 世界单位，覆盖整个点云空间
+
+  for (const [k, aList] of gridA) {
+    const gx = ((k >>> 16) & 0xFF) - 64, gy = ((k >>> 8) & 0xFF) - 64, gz = (k & 0xFF) - 64;
+    const ccx = (gx + 0.5) * cell, ccy = (gy + 0.5) * cell, ccz = (gz + 0.5) * cell;
+    /* 从本格开始逐圈收集候选，直到凑够本桶需要的数量 */
+    const cand = [];                                  // [B 索引, 到桶中心的距离²]
+    for (let r = 0; r < shells.length && cand.length < aList.length; r++) {
+      const offs = shells[r];
+      for (let o = 0; o < offs.length; o += 3) {
+        const bArr = gridB.get(key(gx + offs[o], gy + offs[o + 1], gz + offs[o + 2]));
+        if (!bArr) continue;
+        for (let t = 0; t < bArr.length; t++) {
+          const j = bArr[t];
+          if (used[j]) continue;
+          const dx = B[j * 3] - ccx, dy = B[j * 3 + 1] - ccy, dz = B[j * 3 + 2] - ccz;
+          cand.push([j, dx * dx + dy * dy + dz * dz]);
+        }
+      }
+    }
+    if (cand.length < aList.length) {                // 兜底：全局收集剩余未用 B（正常不会发生）
+      for (const bArr of gridB.values()) {
+        for (const j of bArr) {
+          if (used[j]) continue;
+          const dx = B[j * 3] - ccx, dy = B[j * 3 + 1] - ccy, dz = B[j * 3 + 2] - ccz;
+          cand.push([j, dx * dx + dy * dy + dz * dz]);
+        }
+      }
+    }
+    cand.sort((p, q) => p[1] - q[1]);
+    for (let ci = 0; ci < aList.length; ci++) {
+      const j = cand[ci][0];
+      used[j] = 1;
+      pairs[aList[ci]] = j;
+    }
+  }
+  return pairs;
+}
+
+/* 关键帧序列：起止范围按 0.1 步进（-0.9 → -0.8 → … → 0.9） */
+function buildKeyframes() {
+  const from = params.animFrom, to = params.animTo;
+  const K = Math.max(2, Math.round(Math.abs(to - from) / 0.1) + 1);
+  const kf = [];
+  for (let i = 0; i < K; i++) kf.push(from + (to - from) * i / (K - 1));
+  return kf;
+}
+
+/* 构建流动轨迹：逐级采样各中间分布（-0.9 → -0.8 → … → 0.9），相邻级就近配对并
+   传播（粒子 i 在每级的终点 = 下一级的起点），得到每粒子一条经过全部中间分布的
+   连续轨迹：path[i][k] = (x,y,z,r,g,b)。播放时沿整条轨迹做 Catmull-Rom 插值 */
+function buildMorphLayerAsync(done) {
+  const token = ++animBuildToken;
+  const t0 = performance.now();
+  setTimeout(() => {
+    if (token !== animBuildToken) return;
+    const scan = prepareScan();
+    if (token !== animBuildToken || !scan) return;
+    const kf = buildKeyframes();
+    const K = kf.length;
+    let path = null;            // n × K × 6
+    let cur = null;             // 当前帧（粒子 i 视角）
+    let n = 0;
+    let idx = 0;
+    let bend1 = null, bend2 = null;   // 每粒子轨迹弯曲向量（打破平行流线的格状图案）
+    const step = () => {
+      if (token !== animBuildToken) return;
+      if (idx >= K) { finalize(); return; }
+      const btn = $('btnAnim');
+      if (btn) btn.textContent = `${tr('btnAnimBusy')} ${Math.min(idx + 1, K)}/${K}`;
+      const s = sampleFromScan(scan, kf[idx]);
+      if (token !== animBuildToken || !s) return;
+      let frame;
+      if (idx === 0) {
+        frame = s;
+        cur = s;
+        n = s.positions.length / 3;
+        path = new Float32Array(n * K * 6);
+        /* 每粒子两个随机弯曲向量：轨迹中间点沿各自方向偏折（两端归零），
+           相邻粒子的轨迹不再平行 → 流线族的规则格状图案被打散 */
+        bend1 = new Float32Array(n * 2);
+        bend2 = new Float32Array(n * 2);
+        for (let i = 0; i < n; i++) {
+          const a1 = Math.random() * 2 * Math.PI;
+          const a2 = Math.random() * 2 * Math.PI;
+          bend1[i * 2]     = Math.cos(a1) * ANIM_BEND;
+          bend1[i * 2 + 1] = Math.sin(a1) * ANIM_BEND;
+          bend2[i * 2]     = Math.cos(a2) * ANIM_BEND * 0.6;
+          bend2[i * 2 + 1] = Math.sin(a2) * ANIM_BEND * 0.6;
+        }
+      } else {
+        const pairs = matchNearestPairs(cur.positions, s.positions);
+        const npos = new Float32Array(n * 3), ncol = new Float32Array(n * 3);
+        for (let i = 0; i < n; i++) {
+          const j = pairs[i];
+          npos[i * 3]     = s.positions[j * 3];
+          npos[i * 3 + 1] = s.positions[j * 3 + 1];
+          npos[i * 3 + 2] = s.positions[j * 3 + 2];
+          ncol[i * 3]     = s.colors[j * 3];
+          ncol[i * 3 + 1] = s.colors[j * 3 + 1];
+          ncol[i * 3 + 2] = s.colors[j * 3 + 2];
+        }
+        frame = { positions: npos, colors: ncol };
+        cur = frame;
+      }
+      /* 写入轨迹数组第 idx 列（z 加深度雾化、xy 加每粒子 S 形弯曲） */
+      const wBend = Math.sin(Math.PI * idx / (K - 1));          // 钟形：中间最大、两端为 0
+      const wBend2 = Math.sin(2 * Math.PI * idx / (K - 1));     // 第二谐波：S 形
+      for (let i = 0; i < n; i++) {
+        const o = (i * K + idx) * 6;
+        path[o]     = frame.positions[i * 3]     + bend1[i * 2] * wBend + bend2[i * 2] * wBend2;
+        path[o + 1] = frame.positions[i * 3 + 1] + bend1[i * 2 + 1] * wBend + bend2[i * 2 + 1] * wBend2;
+        path[o + 2] = frame.positions[i * 3 + 2] + (Math.random() - 0.5) * 2 * ANIM_Z_FOG;
+        path[o + 3] = frame.colors[i * 3];
+        path[o + 4] = frame.colors[i * 3 + 1];
+        path[o + 5] = frame.colors[i * 3 + 2];
+      }
+      idx++;
+      setTimeout(step, 0);
+    };
+    const finalize = () => {
+      if (token !== animBuildToken) return;
+      const phase = new Float32Array(n);
+      const aRandom = new Float32Array(n * 3);
+      for (let i = 0; i < n; i++) {
+        phase[i] = Math.random() * params.animPhase;
+        aRandom[i * 3] = Math.random(); aRandom[i * 3 + 1] = Math.random(); aRandom[i * 3 + 2] = Math.random();
+      }
+      /* 颜色不随分布漂移：每颗粒子固定使用"最接近当前分布偏向"的那一级的颜色。
+         原实现里颜色取自粒子当前所在像素，于是流到暗端时整片点云跟着变暗
+         （实测平均亮度掉 22%），看起来就像"一按流动就变暗"。
+         流动只改变粒子的位置分布，颜色保持它自己的身份。 */
+      {
+        const seedK = kf.reduce((best, v, i) =>
+          Math.abs(v - params.dist) < Math.abs(kf[best] - params.dist) ? i : best, 0);
+        for (let i = 0; i < n; i++) {
+          const src = (i * K + seedK) * 6;
+          const cr = path[src + 3], cg = path[src + 4], cb = path[src + 5];
+          for (let k = 0; k < K; k++) {
+            const o = (i * K + k) * 6;
+            path[o + 3] = cr; path[o + 4] = cg; path[o + 5] = cb;
+          }
+        }
+      }
+
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(n * 3), 3));  // 每帧由 CPU 写入
+      geo.setAttribute('color', new THREE.Float32BufferAttribute(new Float32Array(n * 3), 3));
+      geo.setAttribute('aRandom', new THREE.Float32BufferAttribute(aRandom, 3));
+      /* 接触阴影：按轨迹起点那一级的分布烘焙（粒子在流动中密度会变，
+         但"表层亮、内部暗"这个大尺度梯度是稳定的，用起点分布已足够） */
+      const p0 = new Float32Array(n * 3);
+      for (let i = 0; i < n; i++) {
+        const o = i * K * 6;
+        p0[i * 3] = path[o]; p0[i * 3 + 1] = path[o + 1]; p0[i * 3 + 2] = path[o + 2];
+      }
+      /* 分片烘焙是异步的 → 从这里交出去，烘完再装配图层。
+         令牌再查一次：烘焙期间若参数变了/图层已作废，这次结果直接丢弃。 */
+      aoForPositions(p0, n, () => token !== animBuildToken).then(ao => {
+        if (!ao || token !== animBuildToken) return;
+        geo.setAttribute('aAO', new THREE.Float32BufferAttribute(ao, 1));
+
+        const mat = makeMaterial();
+        mat.uniforms.uSize.value = params.size;
+        mat.uniforms.uFloatAmp.value = params.floatAmp;
+        mat.uniforms.uProgress.value = 1;
+        mat.uniforms.uOpacity.value = 0;
+
+        morphLayer = new THREE.Points(geo, mat);
+        morphLayer.frustumCulled = false;
+        morphLayer.visible = false;
+        scene.add(morphLayer);
+        morphCore = addCoreLayer(morphLayer);
+        morphCore.visible = false;
+        morphPath = path;
+        morphPhase = phase;
+        morphK = K;
+        morphCount = n;
+        if (window.__PC_WANT_STATS) {
+          window.__PC_ANIM_GEN_MS = Math.round(performance.now() - t0);
+          window.__PC_ANIM_FRAMES = K;
+          window.__PC_ANIM_PHASE_SPAN = Math.round(params.animPhase * 2000) / 1000;
+          /* 起点状态验证：相位 0~0.2 → 轨迹前 20%（帧 0 ~ ceil(0.2×(K-1))）的颜色平均亮度，
+             应与静态 dist=animFrom 的 avgL 接近（-0.9 时 ≈0.18） */
+          let sl = 0, cnt = 0;
+          const fEnd = Math.min(K - 1, Math.ceil(params.animPhase * (K - 1)));
+          for (let k = 0; k <= fEnd; k++) {
+            for (let i = 0; i < n; i++) {
+              const o = (i * K + k) * 6;
+              sl += 0.299 * path[o + 3] + 0.587 * path[o + 4] + 0.114 * path[o + 5];
+              cnt++;
+            }
+          }
+          window.__PC_ANIM_START_AVGL = Math.round(sl / cnt * 1000) / 1000;
+        }
+        done();
+      });
+    };
+    step();
+  }, 30);
+}
+
+function beginAnimLoop() {
+  animBuilding = false;
+  /* 起始相位：从"最接近当前分布偏向"的那一级出发，而不是从动态范围的端点起步。
+     否则一点击就会从端点（默认动态范围 -0.9~+0.9 的暗端）猛跳过去，
+     观感上就是"一按流动就突然变暗/散掉"。现在点下去接的是你正在看的画面。 */
+  const kf = buildKeyframes();
+  let startK = 0;
+  for (let i = 1; i < kf.length; i++) {
+    if (Math.abs(kf[i] - params.dist) < Math.abs(kf[startK] - params.dist)) startK = i;
+  }
+  animState = { startedAt: performance.now() / 1000, phase0: startK / (kf.length - 1) };
+  const btn = $('btnAnim');
+  btn.textContent = tr('btnAnimRun');
+  btn.classList.add('active');
+  btn.disabled = false;
+}
+
+let animBuilding = false;          // 正在计算轨迹（期间不覆盖按钮文案）
+function startAnim() {
+  if (animState || !imageData) return;
+  preAnimDist = params.dist;
+  $('dist').disabled = true;
+  if (morphLayer) {                      // 已有缓存 → 立即开始
+    animBuilding = false;
+    beginAnimLoop();
+  } else {
+    const btn = $('btnAnim');
+    btn.textContent = tr('btnAnimBusy');
+    btn.disabled = true;
+    animBuilding = true;
+    buildMorphLayerAsync(() => beginAnimLoop());
+  }
+}
+
+/* 首次打开页面：默认自动开启流动动画（只认第一次加载出的点云）。
+   之后换图、调参数都不再自动重开 —— 否则每拖一次滑块都要等约 2 秒重建轨迹。
+   测试/调试可加 ?noflow=1、?settle=1、?stats=1，或用 ?test / ?blank 关闭。 */
+/* 系统开了"减弱动态效果"就不自动播：流动动画是本工具的核心演示，
+   但对动效敏感的人（前庭功能紊乱、偏头痛、惊厥恢复期）可能造成不适，
+   必须由用户主动开启，不能替他决定。镜头巡游本来就默认关，无需处理。 */
+const PREFERS_REDUCED_MOTION = (() => {
+  try { return matchMedia('(prefers-reduced-motion: reduce)').matches; } catch (e) { return false; }
+})();
+let autoFlowTried = false;
+function maybeAutoStartFlow() {
+  if (autoFlowTried) return;
+  autoFlowTried = true;
+  if (PREFERS_REDUCED_MOTION) return;
+  if (window.__PC_NO_AUTOFLOW || window.__PC_SETTLE || window.__PC_WANT_STATS) return;
+  const q = location.search;
+  if (q.includes('test') || q.includes('blank') || q.includes('settle') || q.includes('stats')) return;
+  startAnim();
+}
+
+/* 每帧：沿每粒子完整轨迹做 Catmull-Rom 平滑插值（x,y 曲线、z/颜色线性），
+   写入 position/color 缓冲。一条连续路径、无分段节拍；每粒子相位错开形成粒子流 */
+function updateAnimLayer(fade, t) {
+  if (!morphLayer || !morphPath) return;
+  const tCpu0 = performance.now();
+  const dur = ANIM_MORPH_DUR / params.animSpeed;
+  /* 相位偏移只作用于"沿轨迹的位置"，不影响交叉淡化用的原始时间。
+     注意要加在归一化波形里（下面 cyc），不能写成 phase0 * dur ——
+     那样相位会随播放速度变化，一调速度动画就跳变（踩过）。 */
+  const ta = t - animState.startedAt;
+  const ph0 = animState.phase0 || 0;
+  const geo = morphLayer.geometry;
+  const posAttr = geo.getAttribute('position');
+  const colAttr = geo.getAttribute('color');
+  const P = morphPath, ph = morphPhase;
+  const n = morphCount, K = morphK;
+  const posA = posAttr.array, colA = colAttr.array;
+  const segs = K - 1;
+  for (let i = 0; i < n; i++) {
+    /* 每粒子独立波形：线性三角波往返。相位均匀 → 轨迹进度均匀，
+       任意时刻粒子群均匀散布在轨迹的连续段上（无起点聚集、无分区感）；
+       顶点反向的突变被粒子间相位差异稀释 */
+    let cyc = (ta / dur + ph[i] + ph0) % 2;
+    if (cyc < 0) cyc += 2;                 // 首帧 ta 可能微负（时钟偏差）
+    const u = cyc < 1 ? cyc : 2 - cyc;
+    const s = u * segs;
+    let k = s | 0;
+    if (k > segs - 1) k = segs - 1;
+    const f = s - k;
+    /* Catmull-Rom 需要 4 个控制点（边界钳位） */
+    const km1 = k > 0 ? k - 1 : k;
+    const kp1 = k < K - 1 ? k + 1 : k;
+    const kp2 = k < K - 2 ? k + 2 : kp1;
+    const b0 = (i * K + km1) * 6, b1 = (i * K + k) * 6, b2 = (i * K + kp1) * 6, b3 = (i * K + kp2) * 6;
+    const f2 = f * f, f3 = f2 * f;
+    const x = 0.5 * ((2 * P[b1]) + (-P[b0] + P[b2]) * f
+                   + (2 * P[b0] - 5 * P[b1] + 4 * P[b2] - P[b3]) * f2
+                   + (-P[b0] + 3 * P[b1] - 3 * P[b2] + P[b3]) * f3);
+    const y = 0.5 * ((2 * P[b1 + 1]) + (-P[b0 + 1] + P[b2 + 1]) * f
+                   + (2 * P[b0 + 1] - 5 * P[b1 + 1] + 4 * P[b2 + 1] - P[b3 + 1]) * f2
+                   + (-P[b0 + 1] + 3 * P[b1 + 1] - 3 * P[b2 + 1] + P[b3 + 1]) * f3);
+    posA[i * 3]     = x;
+    posA[i * 3 + 1] = y;
+    posA[i * 3 + 2] = P[b1 + 2] + (P[b2 + 2] - P[b1 + 2]) * f;      // z 线性
+    colA[i * 3]     = P[b1 + 3] + (P[b2 + 3] - P[b1 + 3]) * f;      // 颜色线性
+    colA[i * 3 + 1] = P[b1 + 4] + (P[b2 + 4] - P[b1 + 4]) * f;
+    colA[i * 3 + 2] = P[b1 + 5] + (P[b2 + 5] - P[b1 + 5]) * f;
+  }
+  posAttr.needsUpdate = true;
+  colAttr.needsUpdate = true;
+  morphLayer.visible = true;
+  morphLayer.material.uniforms.uOpacity.value = fade;
+  /* 补偿只给柔和光点：实心球是不透明的，一颗球就是一颗球的颜色，不存在叠加增亮 */
+  morphLayer.material.uniforms.uBright.value = params.solid ? params.bright : params.bright * FLOW_BRIGHT_BOOST;
+  applyLayerUniforms(morphLayer, t, 1);               // 漂浮动画的时间
+  /* UI 显示：相位 0 的参考波形（线性三角波，与每粒子波形一致） */
+  let cyc0 = (ta % (2 * dur)) / dur;
+  if (cyc0 < 0) cyc0 += 2;               // 首帧 ta 可能微负（时钟偏差）
+  if (cyc0 > 1) cyc0 = 2 - cyc0;
+  const u0 = cyc0;
+  params.dist = params.animFrom + (params.animTo - params.animFrom) * u0;
+  $('vDist').textContent = fmtDist(params.dist);
+  $('dist').value = String(Math.round(params.dist * 100) / 100);
+  /* 只写 .value 只动得了手柄：滑轨的白色已填充段由 --fill 变量驱动，
+     而那只有 paintRange 会写。漏了这句，动画播放时手柄在动、填充段却停在开播前的位置。 */
+  paintRange($('dist'));
+  if (window.__PC_WANT_STATS) {
+    window.__PC_MORPH = Math.round(u0 * 1000) / 1000;                    // 测试钩子
+    window.__PC_ANIM_CPU_MS = Math.round((performance.now() - tCpu0) * 100) / 100;
+  }
+}
+
+/* 动态范围变更：clamp 后保存；若动画运行中则退出，端点缓存作废（再按按钮以新范围播放） */
+function onAnimRangeChange() {
+  let f = parseFloat($('animFrom').value);
+  let t2 = parseFloat($('animTo').value);
+  if (isNaN(f)) f = params.animFrom; else f = Math.max(-1, Math.min(1, f));
+  if (isNaN(t2)) t2 = params.animTo; else t2 = Math.max(-1, Math.min(1, t2));
+  $('animFrom').value = String(f);
+  $('animTo').value = String(t2);
+  if (f === params.animFrom && t2 === params.animTo) return;
+  params.animFrom = f;
+  params.animTo = t2;
+  exitAnimIfActive();                   // 运行中 → 退到静态
+  clearAnimLayers();                    // 端点变了 → 流动图层缓存作废
+}
+
+/* ================= 媒体加载（图片 / 视频 / GIF） ================= */
+/* 媒体模式状态 */
+let mediaMode = null;          // null | 'video' | 'gif'
+let mediaEl = null;            // <video> 或 <img>（GIF）
+let mediaCanvas = null;        // GIF：每帧 drawImage 到的画布
+let mediaCtx = null;
+let mediaAspect = 1;
+let mediaW = 320, mediaH = 180;
+let mediaTexture = null;       // VideoTexture / CanvasTexture
+
+/* 释放旧媒体资源（切换图片/视频时） */
+function cleanupMedia() {
+  if (mediaEl && mediaEl.tagName === 'VIDEO') { try { mediaEl.pause(); } catch (e) {} }
+  mediaMode = null;
+  mediaEl = null;
+  mediaCanvas = null;
+  mediaCtx = null;
+  mediaTexture = null;
+}
+
+function processImage(img) {
+  cleanupMedia();
+  setMediaUI();
+  const maxSide = 4096;                                   // 超大图先缩到合理尺寸
+  let { width, height } = img;
+  if (Math.max(width, height) > maxSide) {
+    const k = maxSide / Math.max(width, height);
+    width = Math.round(width * k); height = Math.round(height * k);
+  }
+  const canvas = document.createElement('canvas');
+  canvas.width = width; canvas.height = height;
+  const ctx = canvas.getContext('2d', { willReadFrequently: true });
+  ctx.drawImage(img, 0, 0, width, height);
+  imageData = ctx.getImageData(0, 0, width, height);
+  /* 换图后按"图片中面积最大的颜色"自动配一组参数：背景色、分布偏向、亮度上下限、粒子形态。
+     逐条都被网址参数保护：显式给过的那一项不会被覆盖（调试/复现用）。 */
+  if (!window.__PC_NO_BGAUTO) {
+    const dom = dominantColor(imageData);
+    if (dom) {
+      params.bg = dom;
+      $('bg').value = dom;
+      applyBackground();
+      const r = parseInt(dom.slice(1, 3), 16), g = parseInt(dom.slice(3, 5), 16), bl = parseInt(dom.slice(5, 7), 16);
+      const luma = 0.299 * r + 0.587 * g + 0.114 * bl;      // 0 ~ 255
+      const bright = luma > AUTO_DIST_THRESHOLD;            // 亮背景 / 暗背景
+      if (!window.__PC_DIST_FIXED) setRange('dist', 'dist', bright ? 0 : 0.7);
+      if (!window.__PC_LUM_FIXED) {
+        /* 暗背景：画面里绝大部分是接近黑的底，把下限抬到 30 把"糊在背景里的灰雾"滤掉，
+           主体更干净；亮背景：背景本身就接近白，上限压到 240 去掉过曝的死白。 */
+        setRange('lumMin', 'lumMin', bright ? 0 : 30);
+        setRange('lumMax', 'lumMax', bright ? 240 : 255);
+      }
+      if (!window.__PC_FORM_FIXED) {
+        /* 亮背景用实心球体（背景亮、球体有影才有体积感）；
+           暗背景用柔和光点（发光点更像"光"而不是"珠子"）。 */
+        const solidVal = bright ? '1' : '0';
+        params.solid = bright;
+        $('solid').value = solidVal;
+        syncSegUI('segSolid', solidVal);
+      }
+    }
+  }
+  $('dropzone').classList.add('hidden');
+  /* buildPoints 里含全图扫描 + 采样 + AO 烘焙，全是同步的。必须走 withBusy：
+     否则"拖一张亮底图进来"会在**没有任何提示**的情况下冻结（亮背景会自动切到实心球体，
+     而实心球体要烘 AO —— 实测 300k 粒子时同步阻塞 17.8 秒）。拖滑块那条路径本来就有提示，
+     这里之前漏了。maybeAutoStartFlow 必须排在 buildPoints 之后（它依赖刚建好的点云）。 */
+  withBusy(async () => { await buildPoints(); maybeAutoStartFlow(); });
+}
+
+/* 视频模式：粒子固定网格，颜色/深度由视频帧纹理驱动（GPU 实时采样） */
+function processVideo(video) {
+  cleanupMedia();
+  mediaMode = 'video';
+  mediaEl = video;
+  mediaW = video.videoWidth || 16;
+  mediaH = video.videoHeight || 9;
+  mediaAspect = mediaW / mediaH;
+  const tex = new THREE.VideoTexture(video);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.minFilter = THREE.LinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  mediaTexture = tex;
+  $('dropzone').classList.add('hidden');
+  withBusy(async () => { await buildMediaPoints(); setMediaUI(); });
+}
+
+/* GIF 模式：ImageDecoder 逐帧解码（不依赖 <img> 动画，后台/不可见时也可靠） */
+async function processGifFile(file) {
+  cleanupMedia();
+  mediaMode = 'gif';
+  try {
+    if (!window.ImageDecoder) {
+      if (window.__pcShowError) window.__pcShowError(tr('errGifOld'));
+      return;
+    }
+    const buf = await file.arrayBuffer();
+    const dec = new ImageDecoder({ data: buf, type: 'image/gif' });
+    await dec.tracks.ready;
+    let track = dec.tracks.selectedTrack;
+    if (!track) {
+      for (const t of dec.tracks) { track = t; break; }   // ImageTrackList 无索引，需迭代
+      if (track) track.selected = true;
+      await dec.tracks.ready;
+    }
+    const frameCount = track.frameCount;
+    const first = await dec.decode({ frameIndex: 0 });
+    mediaW = first.image.displayWidth || first.image.codedWidth;
+    mediaH = first.image.displayHeight || first.image.codedHeight;
+    mediaAspect = mediaW / mediaH;
+    mediaCanvas = document.createElement('canvas');
+    mediaCanvas.width = mediaW;
+    mediaCanvas.height = mediaH;
+    mediaCtx = mediaCanvas.getContext('2d');
+    mediaCtx.drawImage(first.image, 0, 0);
+    first.image.close();
+    const tex = new THREE.CanvasTexture(mediaCanvas);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.minFilter = THREE.LinearFilter;
+    tex.magFilter = THREE.LinearFilter;
+    mediaTexture = tex;
+    $('dropzone').classList.add('hidden');
+    withBusy(async () => {
+      await buildMediaPoints();
+      setMediaUI();
+      gifPlayLoop(dec, frameCount);        // 不 await：它是常驻循环，等它等于永远不收提示
+    });
+  } catch (e) {
+    if (window.__pcShowError) window.__pcShowError(tr('errGif') + e.message);
+  }
+}
+
+async function gifPlayLoop(dec, frameCount) {
+  let idx = 1;
+  while (mediaMode === 'gif') {
+    try {
+      const { image } = await dec.decode({ frameIndex: idx % frameCount });
+      mediaCtx.drawImage(image, 0, 0);
+      image.close();
+      idx++;
+      /* 从像素直接构造 DataTexture（CanvasTexture 的 needsUpdate 在不同环境下有兼容坑，
+         新纹理对象强制 GPU 重新上传，最可靠） */
+      const imgData = mediaCtx.getImageData(0, 0, mediaW, mediaH);
+      const dt = new THREE.DataTexture(imgData.data, mediaW, mediaH, THREE.RGBAFormat);
+      dt.colorSpace = THREE.SRGBColorSpace;
+      dt.minFilter = THREE.LinearFilter;
+      dt.magFilter = THREE.LinearFilter;
+      dt.needsUpdate = true;
+      const old = mediaTexture;
+      mediaTexture = dt;
+      if (points) points.material.uniforms.uMediaTex.value = dt;
+      if (old && old.isTexture) old.dispose();
+      if (window.__PC_WANT_STATS) {
+        window.__PC_GIF_FRAME = idx;   // 测试钩子
+        window.__PC_GIF_PX = Array.from(imgData.data.slice(0, 3));
+      }
+    } catch (e) { break; }
+    await new Promise(r => setTimeout(r, 66));   // 固定约 15fps（GIF 常见帧率）
+  }
+}
+
+/* 视频/GIF 模式的粒子：均匀网格 + UV，数量由粒子数量滑块控制 */
+let mediaBuildToken = 0;
+async function buildMediaPoints() {
+  const token = ++mediaBuildToken;
+  const count = Math.min(params.count, 200000);
+  const stride = Math.max(1, Math.round(Math.sqrt((4000 * 2200) / count)));  // 以 4000×2200 虚拟分辨率分格
+  const worldW = 10;
+  const worldH = 10 / mediaAspect;
+  const positions = [], uvs = [], randoms = [];
+  const cols = Math.round(worldW * 100), rows = Math.round(worldH * 100);
+  for (let ry = 0; ry < rows; ry += stride * 0.7) {
+    for (let rx = 0; rx < cols; rx += stride * 0.7) {
+      const jx = (Math.random() - 0.5) * 2.2;
+      const jy = (Math.random() - 0.5) * 2.2;
+      positions.push((rx + 0.5 + jx) / 100 - worldW / 2, -(ry + 0.5 + jy) / 100 + worldH / 2, 0);
+      uvs.push(rx / cols, 1 - ry / rows);
+      randoms.push(Math.random(), Math.random(), Math.random());
+    }
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geo.setAttribute('color', new THREE.Float32BufferAttribute(new Float32Array(positions.length), 3));  // 占位（媒体模式不用）
+  geo.setAttribute('aRandom', new THREE.Float32BufferAttribute(randoms, 3));
+  geo.setAttribute('aUV', new THREE.Float32BufferAttribute(uvs, 2));
+  /* 实心球体模式下媒体粒子同样要烘 AO；分片烘焙 → await，期间让出主线程 */
+  const ao = await aoForPositions(positions, positions.length / 3, () => token !== mediaBuildToken);
+  if (!ao) return;                       // 期间又换了素材 → 本次作废
+  geo.setAttribute('aAO', new THREE.Float32BufferAttribute(ao, 1));
+  const mat = makeMaterial();
+  mat.uniforms.uSize.value = params.size;
+  mat.uniforms.uFloatAmp.value = params.floatAmp;
+  mat.uniforms.uOpacity.value = 1;
+  mat.uniforms.uMediaMode.value = 1;
+  mat.uniforms.uMediaTex.value = mediaTexture;
+  setMediaUniforms(mat);
+  if (points) { removeCoreLayer(pointsCore); points.geometry.dispose(); points.material.dispose(); scene.remove(points); }
+  points = new THREE.Points(geo, mat);
+  points.frustumCulled = false;
+  scene.add(points);
+  pointsCore = addCoreLayer(points);
+  animStart = (window.__PC_SETTLE ? -10 : performance.now() / 1000);
+  infoState = { kind: 'media', video: mediaMode === 'video', w: mediaW, h: mediaH, n: positions.length / 3 | 0 };
+  renderInfo();
+}
+
+function setMediaUniforms(mat) {
+  mat.uniforms.uDepthRange.value = params.depth * 2;
+  mat.uniforms.uNoise.value = params.noise;
+}
+
+/* 媒体模式下禁用不适用控件（分布偏向/动态分布基于静态采样） */
+function setMediaUI() {
+  const dis = !!mediaMode;
+  for (const id of ['dist', 'animFrom', 'animTo', 'animPhase', 'btnAnim', 'lumMin', 'lumMax']) {
+    const el = $(id);
+    if (el) el.disabled = dis;
+  }
+  $('panel').classList.toggle('media-mode', dis);   // 组内提示条：本组参数在当前模式不可用
+  const btn = $('btnAnim');
+  if (dis) {
+    btn.textContent = tr('btnAnimOff');
+    btn.classList.remove('active');
+  } else if (btn && !animBuilding) {
+    btn.textContent = animState ? tr('btnAnimRun') : tr('btnAnimIdle');
+  }
+}
+
+function loadImageFromBlob(blob) {
+  const reader = new FileReader();
+  reader.onload = e => {
+    const img = new Image();
+    img.onload = () => processImage(img);
+    img.src = e.target.result;
+  };
+  reader.readAsDataURL(blob);
+}
+function loadImage(file) { loadImageFromBlob(file); }
+
+/* 按文件类型分派：视频 / GIF / 图片 */
+function loadFile(file) {
+  if (!file) return;
+  window.__PC_USER_PICKED = true;    // 标记用户已自选素材（默认图迟到时不再覆盖）
+  const type = file.type || '';
+  if (type.startsWith('video/')) {
+    const url = URL.createObjectURL(file);
+    const v = document.createElement('video');
+    v.muted = true; v.loop = true; v.playsInline = true; v.autoplay = true;
+    v.onloadedmetadata = () => { processVideo(v); v.play().catch(() => {}); };
+    v.onerror = () => { if (window.__pcShowError) window.__pcShowError(tr('errVideo')); };
+    v.src = url;
+  } else if (type === 'image/gif') {
+    processGifFile(file);
+  } else {
+    loadImage(file);
+  }
+}
+
+/* 默认素材：打开页面即加载（开发版读 testpic/black_4.jpg，分享版用内嵌的 DEFAULT_IMG_DATAURL）。
+   地址后加 ?blank 可跳过（空场景测试）；?test 用内置测试图，也会跳过默认图以免两者竞争。 */
+if (!location.search.includes('blank') && !location.search.includes('test')) {
+  const defUrl = (typeof DEFAULT_IMG_DATAURL !== 'undefined') ? DEFAULT_IMG_DATAURL : 'testpic/black_4.jpg';
+  /* 默认图是异步解码的，可能比用户手速还慢。用 userPicked 标记：
+     一旦用户自己选过素材，迟到的默认图就不再覆盖（否则会出现"上传完又被换回去"）。 */
+  const loadDefault = url => {
+    if (url.indexOf('data:') === 0) {
+      const img = new Image();
+      img.onload = () => { if (!window.__PC_USER_PICKED) processImage(img); };
+      img.onerror = () => {};
+      img.src = url;
+    } else {
+      fetch(url).then(r => { if (!r.ok) throw new Error(url); return r.blob(); })
+        .then(blob => { if (!window.__PC_USER_PICKED) loadImageFromBlob(blob); })
+        .catch(() => {});   // 拿不到就保持空场景，不报错打扰
+    }
+  };
+  loadDefault(defUrl);
+}
+
+/* 自动测试钩子：地址后加 ?test 会自动加载测试图，无需手动上传 */
+if (location.search.includes('test')) {
+  /* 分享版会内嵌 TEST_IMG_DATAURL（data: URL，file:// 双击也可用）；开发版回退为 fetch 本地 test.jpg */
+  const testUrl = (typeof TEST_IMG_DATAURL !== 'undefined') ? TEST_IMG_DATAURL : 'test.jpg';
+  if (testUrl.indexOf('data:') === 0) {
+    const img = new Image();
+    img.onload = () => processImage(img);
+    img.src = testUrl;
+  } else {
+    fetch(testUrl).then(r => r.blob()).then(loadImageFromBlob)
+      .catch(err => { if (window.__pcShowError) window.__pcShowError(tr('errTestImg') + err.message); });
+  }
+}
+
+/* ================= UI 绑定 ================= */
+const fileInput = $('file');
+const dropzone = $('dropzone');
+dropzone.addEventListener('click', () => fileInput.click());
+fileInput.addEventListener('change', e => { if (e.target.files[0]) loadFile(e.target.files[0]); });
+['dragover', 'dragenter'].forEach(ev => dropzone.addEventListener(ev, e => { e.preventDefault(); dropzone.classList.add('drag'); }));
+['dragleave', 'drop'].forEach(ev => dropzone.addEventListener(ev, e => { e.preventDefault(); dropzone.classList.remove('drag'); }));
+dropzone.addEventListener('drop', e => { const f = e.dataTransfer.files[0]; if (f && (f.type.startsWith('image/') || f.type.startsWith('video/'))) loadFile(f); });
+
+$('btnUpload').addEventListener('click', () => fileInput.click());
+$('btnReset').addEventListener('click', () => {
+  if (camAnimActive) stopCamAnim();     // 重置视角前先退出镜头动画
+  camera.position.set(0, 0, 8.5);
+  controls.target.set(0, 0, 0);
+  controls.update();
+  recenterView();          // 清掉阻尼里残留的平移量，否则按钮不会消失
+});
+/* "回到中心"：只把观察中心（controls.target）拉回原点，保持当前朝向与距离。
+   按钮仅在中心被平移偏离后出现 —— 没偏的时候它没有意义，不该占位置。 */
+function syncRecenter() {
+  const btn = $('btnRecenter');
+  if (btn) btn.classList.toggle('show', controls.target.lengthSq() > 1e-6);
+}
+/* 把观察中心归零。注意：开启阻尼时 OrbitControls 会在每帧继续把残留的 panOffset
+   加到 target 上，直接置零会被它下一帧又推走（"回到中心"按钮就永远不消失）。
+   所以要先把阻尼关掉跑一帧、让 panOffset 被吃干净并清零，再归零。 */
+function recenterView() {
+  const damp = controls.enableDamping;
+  controls.enableDamping = false;
+  controls.update();
+  camera.position.sub(controls.target);   // 相机同步平移 → 朝向与距离完全不变
+  controls.target.set(0, 0, 0);
+  controls.update();
+  controls.enableDamping = damp;
+  syncRecenter();
+}
+$('btnRecenter').addEventListener('click', recenterView);
+controls.addEventListener('change', syncRecenter);
+syncRecenter();
+
+/* ================= 素材信息（键值行，右列数字对齐） =================
+   只存"语义状态"，渲染时按当前语言取词 → 切换语言可直接重算，不必重新加载素材 */
+let infoState = { kind: 'idle' };            // idle | none | image | media
+function renderInfo() {
+  const el = $('info');
+  if (infoState.kind === 'image' || infoState.kind === 'media') {
+    const key = infoState.kind === 'media' ? (infoState.video ? 'kVideo' : 'kGif') : 'kImage';
+    const rows = [
+      [tr(key), `${infoState.w} × ${infoState.h}`],
+      [tr('kParticles'), `${infoState.n.toLocaleString('en-US')}${tr('kPcs')}`],
+    ];
+    const note = infoState.kind === 'media' ? 'nMediaLive' : 'nOrbit';
+    el.innerHTML =
+      rows.map(([k, v]) => `<div class="li"><span class="k">${k}</span><span class="v">${v}</span></div>`).join('') +
+      `<div class="note">${tr(note)}</div>`;
+    return;
+  }
+  el.textContent = tr(infoState.kind === 'none' ? 'nNoPixels' : 'infoEmpty');
+}
+
+/* ================= 镜头动画按钮 ================= */
+$('btnCamAnim').addEventListener('click', () => { camAnimActive ? stopCamAnim() : startCamAnim(); });
+
+/* ================= 滑块 ================= */
+/* --fill 驱动"已填充的白色轨道"，是全局唯一的强调色来源 */
+function paintRange(el) {
+  const min = parseFloat(el.min), max = parseFloat(el.max);
+  const p = max > min ? (parseFloat(el.value) - min) / (max - min) * 100 : 0;
+  el.style.setProperty('--fill', p.toFixed(2) + '%');
+}
+const rangeBindings = [];         // 切语言时按当前语言重算读数
+const fmtCount = v => LANG === 'en'
+  ? Math.round(v / 1000) + 'k'
+  : (v / 10000).toFixed(1).replace(/\.0$/, '') + ' 万';
+function bindRange(id, key, fmt, onChange) {
+  const el = $(id), label = $('v' + key[0].toUpperCase() + key.slice(1));
+  const show = () => { label.textContent = fmt(params[key]); paintRange(el); };
+  el.value = String(params[key]);   // 同步到滑块（含 URL 参数覆盖后的值）
+  show();
+  el.addEventListener('input', () => { params[key] = parseFloat(el.value); show(); onChange && onChange(); });
+  rangeBindings.push({ el, label, key, fmt });
+
+  /* 重置按钮：回到设计默认值（不是被网址或换图自动判定改过的值） */
+  const def = PARAM_DEFAULTS[key];
+  if (def === undefined) return;
+  const ctl = el.closest('.ctl');
+  const head = ctl && ctl.querySelector('.ctl-head');
+  if (!head) return;
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'rv';
+  btn.textContent = '↺';
+  btn.dataset.i18nTitle = 'reset';
+  const mark = () => btn.classList.toggle('at-default', params[key] === def);
+  btn.addEventListener('click', () => {
+    params[key] = def;
+    el.value = String(def);
+    show();
+    mark();
+    onChange && onChange();
+  });
+  el.addEventListener('input', mark);
+  head.insertBefore(btn, head.querySelector('.v'));
+  mark();
+}
+function refreshRangeLabels() { rangeBindings.forEach(b => { b.label.textContent = b.fmt(params[b.key]); }); }
+/* 只同步分段控件的显示状态，不触发它的 change 逻辑（避免多余的重建） */
+function syncSegUI(segId, value) {
+  const seg = $(segId);
+  if (!seg) return;
+  Array.from(seg.children).forEach(b => {
+    const on = b.dataset.val === value;
+    b.classList.toggle('on', on);
+    b.setAttribute('aria-pressed', on ? 'true' : 'false');
+  });
+}
+
+/* 程序化改动滑块：params、滑块位置、读数、已填充轨道一次性同步 */
+function setRange(id, key, value) {
+  params[key] = value;
+  const el = $(id);
+  if (!el) return;
+  el.value = String(value);
+  paintRange(el);
+  const b = rangeBindings.find(r => r.el === el);
+  if (b) b.label.textContent = b.fmt(value);
+}
+bindRange('count', 'count', fmtCount, rebuildDebounced);
+bindRange('lumMin', 'lumMin', v => v.toFixed(0), rebuildDebounced);
+bindRange('lumMax', 'lumMax', v => v.toFixed(0), rebuildDebounced);
+bindRange('size', 'size', v => v.toFixed(1), () => setAllLayersUniform('uSize', params.size));
+bindRange('bright', 'bright', v => '×' + v.toFixed(2), () => setAllLayersUniform('uBright', params.bright));
+bindRange('sat', 'sat', v => v.toFixed(2), () => setAllLayersUniform('uSaturation', params.sat));
+bindRange('depth', 'depth', v => v.toFixed(1), () => {
+  if (mediaMode) { if (points) setMediaUniforms(points.material); } else rebuildDebounced();
+});
+bindRange('noise', 'noise', v => v.toFixed(2), () => {
+  if (mediaMode) { if (points) setMediaUniforms(points.material); } else rebuildDebounced();
+});
+bindRange('dist', 'dist', fmtDist, rebuildDebounced);
+bindRange('animSpeed', 'animSpeed', v => '×' + v.toFixed(1), () => {});  // 实时生效（动画帧内读取）
+bindRange('animPhase', 'animPhase', v => v.toFixed(2), rebuildDebounced);
+bindRange('floatAmp', 'floatAmp', v => v.toFixed(2), () => setAllLayersUniform('uFloatAmp', params.floatAmp));
+bindRange('bloom', 'bloom', v => v.toFixed(2), () => {
+  /* 辉光为 0 时彻底禁用 pass：UnrealBloomPass 的低通链会把小粒子搅成块状网格 */
+  bloomPass.strength = params.bloom;
+  bloomPass.enabled = params.bloom > 0.001;
+  updateBloomThreshold();          // 阈值始终抬在背景亮度之上 → 背景不会被辉光晕开
+});
+/* 初始化同步（bug 修复：之前 bloomPass 构造时 strength=0.9，滑块默认 0 未同步到 pass） */
+bloomPass.strength = params.bloom;
+bloomPass.enabled = params.bloom > 0.001;
+updateBloomThreshold();
+
+/* 重算提示：buildPoints（采样 + 烘焙接触阴影）是同步的，会阻塞主线程、
+   期间界面完全没反应。这里先把提示画出来、让浏览器走完一帧，再开始重算，
+   否则用户只会看到"卡住"，看不到任何反馈。
+
+   用"令牌"而不是计数器：连续拖动滑块时本函数会被反复调用，若用计数器会出现
+   只加不减（N 次 show 只配 1 次 hide），提示就永远不消失（踩过这个坑）。
+   令牌只有最新一次能收起提示，被取代的旧任务无权改状态。 */
+let busyToken = 0;
+let busyWatchdog = null;
+function showBusy() {
+  const t = ++busyToken;
+  const el = $('busy');
+  if (el) el.classList.add('show');
+  /* 兜底看门狗：万一某条路径漏了收起（或重算异常慢），也绝不让提示永久卡住。
+     旧的看门狗一律作废，只有最后一次能真正收起。 */
+  clearTimeout(busyWatchdog);
+  busyWatchdog = setTimeout(() => hideBusy(t), 15000);
+  return t;
+}
+function hideBusy(t) {
+  if (t !== busyToken) return;      // 已被更新的一次取代，交给它去收起
+  clearTimeout(busyWatchdog);
+  const el = $('busy');
+  if (el) el.classList.remove('show');
+}
+/* 等提示真正画出来，再执行可能阻塞主线程的重算 —— 否则重算会把提示一起堵住，用户看不到反馈。
+   优先等两帧；但 rAF 在渲染循环停止时会被节流到几百毫秒甚至更久
+   （?settle 测试模式下 animate() 是停的，导出期间也是停的 —— 实测能把重算整体推迟 2 秒），
+   所以加一个 60ms 兜底：两条路径谁先到谁执行，另一条由 started 挡掉。
+   正常使用时循环在跑，rAF 约 16~33ms 就到，兜底不会生效。 */
+function afterPaint(fn) {
+  let started = false, fallback = null;
+  const start = () => {
+    if (started) return;
+    started = true;
+    if (fallback !== null) clearTimeout(fallback);
+    setTimeout(fn, 0);
+  };
+  fallback = setTimeout(start, 60);
+  requestAnimationFrame(() => requestAnimationFrame(start));
+}
+function withBusy(fn) {
+  const t = showBusy();
+  /* fn 可能是 async（buildPoints / rebuildMaterials 要 await 分片烘焙）——
+     必须 await 它，否则 finally 会在烘焙还没跑完时就把提示收掉。 */
+  afterPaint(async () => { try { await fn(); } finally { hideBusy(t); } });
+}
+
+let rebuildTimer = null;
+function rebuildDebounced() {
+  exitAnimIfActive();               // 拖动会改变采样结果的参数 → 先退出动态分布
+  clearTimeout(rebuildTimer);
+  const t = showBusy();             // 防抖期间就提示，避免"拖完没反应"
+  rebuildTimer = setTimeout(() => {
+    /* 再等提示画出来，然后才做重算。buildPoints 是 async（要 await 分片烘焙）→ 必须 await，
+       否则提示会在烘焙还没跑完时就收掉。 */
+    afterPaint(async () => { try { await buildPoints(); } finally { hideBusy(t); } });
+  }, 120);
+}
+
+/* ================= 分段控件 =================
+   2~3 个互斥选项统一用同一形态（下拉框只留给选项≥3的少数组件）。
+   点击写回隐藏的原生 select 并派发 change —— 既有逻辑与自动化测试钩子保持不变。 */
+function bindSeg(segId, selId) {
+  const seg = $(segId), sel = $(selId);
+  if (!seg || !sel) return;
+  const sync = () => Array.from(seg.children).forEach(b => {
+    const on = b.dataset.val === sel.value;
+    b.classList.toggle('on', on);
+    b.setAttribute('aria-pressed', on ? 'true' : 'false');
+  });
+  seg.addEventListener('click', e => {
+    const b = e.target.closest('button[data-val]');
+    if (!b || sel.disabled || sel.value === b.dataset.val) return;
+    sel.value = b.dataset.val;
+    sel.dispatchEvent(new Event('change', { bubbles: true }));
+    sync();
+  });
+  sel.addEventListener('change', sync);
+  sync();
+}
+bindSeg('segLang', 'lang');
+bindSeg('segDepthMode', 'depthMode');
+/* 粒子形态的初始值要在 bindSeg 之前写回，否则 URL 覆盖后分段控件不会高亮正确项 */
+$('solid').value = params.solid ? '1' : '0';
+bindSeg('segSolid', 'solid');
+bindSeg('segAutoRotate', 'autoRotate');
+bindSeg('segExpFps', 'expFps');
+bindSeg('segExpFmt', 'expFmt');
+bindSeg('segExpMode', 'expMode');
+
+$('lang').value = LANG;
+$('lang').addEventListener('change', e => applyLang(e.target.value));
+$('expMode').addEventListener('change', syncExportMode);
+
+$('depthMode').addEventListener('change', e => { exitAnimIfActive(); params.depthMode = e.target.value; buildPoints(); });
+/* 切换粒子形态：柔和光点 / 实心球体。着色器不同 → 需要重建材质，但不必重采样粒子 */
+$('solid').addEventListener('change', e => { params.solid = e.target.value === '1'; withBusy(rebuildMaterials); });
+/* 背景颜色 */
+$('bg').value = params.bg;
+$('bg').addEventListener('input', e => { params.bg = e.target.value; applyBackground(); });
+applyBackground();
+$('autoRotate').addEventListener('change', e => {
+  params.autoRotate = e.target.value === '1';              // 与 URL 参数覆盖保持一致的状态
+  controls.autoRotate = params.autoRotate;
+});
+$('autoRotate').value = params.autoRotate ? '1' : '0';   // 同步 URL 参数覆盖后的状态
+
+/* 动态分布按钮：开启 / 停止 */
+$('btnAnim').addEventListener('click', () => { animState ? stopAnim() : startAnim(); });
+
+/* 动态范围端点输入：变更后保存（运行中则重建并自动重启） */
+$('animFrom').addEventListener('change', onAnimRangeChange);
+$('animTo').addEventListener('change', onAnimRangeChange);
+$('animFrom').value = String(params.animFrom);
+$('animTo').value = String(params.animTo);
+
+/* ================= 渲染导出：内容优先（序列 / 单帧） =================
+   单帧导出只有一帧，"时长/序列帧率"没有意义 → 整块变灰并 disabled；
+   分辨率与格式对两种模式都生效，放在下面的"输出"区，保持可用。 */
+const exportLabel = () => $('expMode').value === 'still' ? tr('btnExportStill') : tr('btnExportSeq');
+/* 导出提示条：进度写在屏上（面板可能已收起），"停止"可中止。
+   渲染循环每帧都 await 一次 setTimeout(0)，所以按钮的 click 一定能插进来。
+   进度期间摘掉 #recTxt 的 data-i18n，否则切语言时 applyLang() 会把进度文字冲掉。 */
+let exportStop = false, recTxtKey = null;
+function setRecText(t) { $('recTxt').textContent = t; }
+function setRecActive(on) {
+  $('recBar').classList.toggle('on', !!on);
+  if (on) { recTxtKey = $('recTxt').dataset.i18n || 'recText'; delete $('recTxt').dataset.i18n; }
+  else {
+    if (recTxtKey) $('recTxt').dataset.i18n = recTxtKey;
+    $('recTxt').textContent = tr(recTxtKey || 'recText');
+    $('recStop').textContent = tr('recStop');
+  }
+}
+$('recStop').addEventListener('click', () => {
+  if (!exporting) return;
+  exportStop = true;
+  setRecText(tr('recStopping'));
+});
+function syncExportMode() {
+  const still = $('expMode').value === 'still';
+  for (const id of ['expSec', 'expFps']) { const el = $(id); if (el) el.disabled = still; }
+  const seg = $('segExpFps');
+  if (seg) {
+    seg.classList.toggle('locked', still);
+    Array.from(seg.children).forEach(b => { b.disabled = still; });
+  }
+  $('panel').classList.toggle('export-still', still);
+  if (!exporting) $('btnExport').textContent = exportLabel();
+}
+
+/* ================= 语言切换 ================= */
+function applyLang(lang, persist) {
+  LANG = I18N[lang] ? lang : 'zh';
+  document.documentElement.lang = LANG === 'en' ? 'en' : 'zh-CN';
+  document.title = tr('docTitle');
+  document.querySelectorAll('[data-i18n]').forEach(el => { el.textContent = tr(el.dataset.i18n); });
+  document.querySelectorAll('[data-i18n-title]').forEach(el => { el.title = tr(el.dataset.i18nTitle); });
+  document.querySelectorAll('[data-i18n-aria]').forEach(el => { el.setAttribute('aria-label', tr(el.dataset.i18nAria)); });
+  /* 动态文案重算 */
+  refreshRangeLabels();
+  renderInfo();
+  updateCamBtnLabel();
+  setMediaUI();
+  syncExportMode();
+  if ($('lang').value !== LANG) $('lang').value = LANG;
+  if (persist !== false) { try { localStorage.setItem('pc.lang', LANG); } catch (e) {} }
+}
+
+/* ================= 面板收起 / 唤出 ================= */
+function setPanelHidden(hidden) {
+  /* inert：立刻把整块面板移出 Tab 顺序与无障碍树。
+     只靠 CSS 的 visibility 会留一个窗口——收起过渡有 .25s 延迟，那段时间里元素
+     已经看不见、却仍然可以被 Tab 到（实测能一路走到 btnUpload / btnAnim / btnExport）。
+     inert 没有这个窗口，即时生效；visibility 保留作老浏览器的兜底。 */
+  for (const id of ['panelL', 'panel']) {
+    const el = $(id);
+    el.classList.toggle('hidden', hidden);
+    if (hidden) el.setAttribute('inert', ''); else el.removeAttribute('inert');
+  }
+  $('toggleBtn').classList.toggle('show', hidden);
+  $('collapseBtn').setAttribute('aria-expanded', hidden ? 'false' : 'true');
+}
+$('collapseBtn').addEventListener('click', () => setPanelHidden(true));
+$('toggleBtn').addEventListener('click', () => setPanelHidden(false));
+
+/* 初始化：套用语言（刷新读数、按钮与素材信息的文案） */
+applyLang(LANG, false);
+
+/* 分组展开状态记忆：调参时常收起不用的组，下次打开保持原样 */
+(function restoreGroups() {
+  const groups = Array.from(document.querySelectorAll('#panel .group'));
+  let saved = null;
+  try { saved = JSON.parse(localStorage.getItem('pc.groups2') || 'null'); } catch (e) {}
+  if (saved && typeof saved === 'object') {
+    groups.forEach(g => { if (saved[g.dataset.g] !== undefined) g.open = !!saved[g.dataset.g]; });
+  }
+  groups.forEach(g => g.addEventListener('toggle', () => {
+    const state = {};
+    groups.forEach(x => { state[x.dataset.g] = x.open; });
+    try { localStorage.setItem('pc.groups2', JSON.stringify(state)); } catch (e) {}
+  }));
+})();
+
+/* 测试钩子：对比主层与流动层的颜色/透明度，用于定位"流动变暗" */
+window.__PC_COLORSTATS = () => {
+  const f = (obj, name) => {
+    if (!obj) return null;
+    const a = obj.geometry.getAttribute('color');
+    if (!a) return null;
+    const n = a.count;
+    let s = 0, mx = 0;
+    for (let i = 0; i < n; i++) {
+      const l = 0.2126 * a.array[i * 3] + 0.7152 * a.array[i * 3 + 1] + 0.0722 * a.array[i * 3 + 2];
+      s += l; if (l > mx) mx = l;
+    }
+    const u = obj.material.uniforms;
+    const pos = obj.geometry.getAttribute('position');
+    let zMean = null, zMin = null, zMax = null;
+    if (pos) {
+      let t = 0, mn = Infinity, mx = -Infinity;
+      for (let i = 0; i < pos.count; i++) {
+        const z = pos.array[i * 3 + 2];
+        t += z; if (z < mn) mn = z; if (z > mx) mx = z;
+      }
+      zMean = +(t / pos.count).toFixed(3); zMin = +mn.toFixed(2); zMax = +mx.toFixed(2);
+    }
+    const ao = obj.geometry.getAttribute('aAO');
+    let aoMean = null, aoMin = null;
+    if (ao) {
+      let t = 0, mn = 1;
+      for (let i = 0; i < ao.count; i++) { t += ao.array[i]; if (ao.array[i] < mn) mn = ao.array[i]; }
+      aoMean = +(t / ao.count).toFixed(4); aoMin = +mn.toFixed(4);
+    }
+    return { name, n, meanLin: +(s / n).toFixed(5), maxLin: +mx.toFixed(5),
+             zMean, zMin, zMax, aoMean, aoMin,
+             uOpacity: u.uOpacity.value, uAlpha: u.uAlpha.value, uBright: u.uBright.value,
+             uSolid: u.uSolid ? u.uSolid.value : null, visible: obj.visible };
+  };
+  return { main: f(points, 'main'), morph: f(morphLayer, 'morph') };
+};
+
+/* ================= 主循环 ================= */
+const clock = new THREE.Clock();
+let settleFrames = 0;
+
+/* 渲染一帧（时间参数化：实时循环与逐帧导出共用） */
+function renderFrame(t, controlsDelta) {
+  if (animState) {
+    /* 动态分布运行：驱动粒子连续流动 */
+    const ta = t - animState.startedAt;
+    const fade = Math.min(1, ta / 0.4);            // 开启时整体淡入，掩盖瞬间换场
+    updateAnimLayer(fade, t);
+    if (points && fade < 0.999) {
+      points.material.uniforms.uOpacity.value = 1 - fade;   // 主层同步淡出
+      applyLayerUniforms(points, t, Math.min(1, (t - animStart) / ANIM_DURATION));
+    } else if (points) {
+      points.visible = false;
+    }
+  } else if (points) {
+    points.material.uniforms.uOpacity.value = 1;
+    applyLayerUniforms(points, t, Math.min(1, (t - animStart) / ANIM_DURATION));
+  }
+  syncOcclusionDepth();   // 必须在渲染前：按各图层当前的不透明度决定谁写深度
+  /* 深度预通道层只在"柔和光点"模式下工作；实心球体自己写深度，不需要它。
+     跟随所属图层的可见性（流动动画中主层会被隐藏）。 */
+  const coreOn = !params.solid && !window.__PC_NOCORE;
+  if (pointsCore) pointsCore.visible = coreOn && points && points.visible;
+  if (morphCore) morphCore.visible = coreOn && morphLayer && morphLayer.visible;
+  updateProjUniforms();   // 视口 / 导出分辨率变化后刷新投影换算
+  if (camAnimActive) {
+    updateCamAnim(t - camAnimT0);                    // 镜头动画接管相机
+  }
+  controls.update(controlsDelta);                    // 导出时传显式步长，保证旋转速度与帧率无关
+  if (window.__PC_NOPOST) renderer.render(scene, camera); else composer.render();
+}
+
+function animate() {
+  /* settle 测试模式下：渲染 10 帧后停止 rAF（画面定格，方便 headless 截图） */
+  if (!exporting && !(window.__PC_SETTLE && settleFrames >= 10)) {
+    requestAnimationFrame(animate);
+  }
+  settleFrames++;
+  renderFrame(clock.getElapsedTime());
+}
+animate();
+
+/* ================= 逐帧渲染导出（3D 软件式离线渲染，帧序列） ================= */
+async function renderExport() {
+  if (exporting) return;
+  if (!window.showDirectoryPicker) {
+    if (window.__pcShowError) window.__pcShowError(tr('errNoDir'));
+    return;
+  }
+  const seconds = Math.max(1, Math.min(120, parseFloat($('expSec').value) || 8));
+  const fps = parseInt($('expFps').value);
+  const fmt = $('expFmt').value;
+  const res = $('expRes').value;
+  const mode = $('expMode').value;               // 'anim' 动画序列 / 'still' 当前画面
+  const total = mode === 'still' ? 1 : Math.round(seconds * fps);
+  const btn = $('btnExport');
+
+  /* 测试钩子：headless 环境无法选文件夹，直接统计帧数据 */
+  const testMode = window.__PC_WANT_STATS;
+  let dir = null;
+  if (!testMode) {
+    /* 用户在选择框里点"取消"会抛 AbortError —— 那是正常操作，不是错误。
+       若让它冒泡出去，会被全局 unhandledrejection 抓成"模块加载失败"红条（实测过），
+       提示与真实原因完全无关。故就地拦下、安静返回。 */
+    try {
+      dir = await window.showDirectoryPicker({ mode: 'readwrite' });
+    } catch (e) {
+      if (e && e.name === 'AbortError') return;
+      throw e;
+    }
+  }
+
+  /* 切换导出分辨率 */
+  let W2 = innerWidth, H2 = innerHeight;
+  if (res !== 'window') {
+    [W2, H2] = res.split('x').map(Number);
+  }
+  const prevSize = { w: innerWidth, h: innerHeight };
+  const prevPixelRatio = renderer.getPixelRatio();
+  /* composer 的像素比是构造时从 renderer 锁定的（屏幕 dpr，Retina 上为 2），
+     导出时若只改 renderer 的像素比，composer 仍会按 2× 渲染：
+     粒子尺寸按 canvas 高度算、却画在 2× 的缓冲上 → 相对尺寸直接减半，
+     最后再被 2× 降采样 → 又小又灰。两者必须一起改。 */
+  renderer.setPixelRatio(1);
+  renderer.setSize(W2, H2, false);
+  composer.setPixelRatio(1);
+  composer.setSize(W2, H2);
+  camera.aspect = W2 / H2;
+  camera.updateProjectionMatrix();
+
+  exporting = true;
+  const tStart = clock.getElapsedTime();
+  let framesWritten = 0, totalBytes = 0;
+  exportStop = false;                            // 每次导出都从"未中止"起算
+  setRecActive(true);
+  try {
+    for (let i = 0; i < total; i++) {
+      /* 中止：提示条上的"停止"。文件夹里已写出的帧保留（序列不完整，自行取舍） */
+      if (exportStop) break;
+      /* 单帧模式：渲染当前画面（当前时刻，不推进动画） */
+      const tFrame = mode === 'still' ? tStart : tStart + i / fps;
+      renderFrame(tFrame, 1 / fps);
+      const blob = await new Promise(res => renderer.domElement.toBlob(res, fmt === 'png' ? 'image/png' : 'image/jpeg', 0.95));
+      if (testMode) {
+        framesWritten++; totalBytes += blob.size;
+      } else {
+        const name = mode === 'still'
+          ? `still_${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.${fmt}`
+          : `frame_${String(i).padStart(5, '0')}.${fmt}`;
+        const fh = await dir.getFileHandle(name, { create: true });
+        const w = await fh.createWritable();
+        await w.write(blob);
+        await w.close();
+        framesWritten++;
+        totalBytes += blob.size;
+      }
+      if (exportStop) break;
+      const label = `${tr('exporting')} ${i + 1}/${total}`;
+      btn.textContent = label;                   // 面板按钮上仍保留进度（面板可能已收起）
+      setRecText(`${tr('recProgress')} ${i + 1} / ${total}`);
+      await new Promise(r => setTimeout(r, 0));      // 让 UI 喘息（进度刷新）
+    }
+  } catch (e) {
+    if (window.__pcShowError) window.__pcShowError(tr('errExport') + e.message);
+  } finally {
+    setRecActive(false);
+  }
+  /* 恢复窗口尺寸与像素比 */
+  renderer.setPixelRatio(prevPixelRatio);
+  renderer.setSize(prevSize.w, prevSize.h, false);
+  composer.setPixelRatio(prevPixelRatio);
+  composer.setSize(prevSize.w, prevSize.h);
+  camera.aspect = prevSize.w / prevSize.h;
+  camera.updateProjectionMatrix();
+  renderer.setPixelRatio(prevPixelRatio);
+  exporting = false;
+  btn.textContent = exportLabel();
+  if (window.__PC_WANT_STATS) window.__PC_EXP = { frames: framesWritten, bytes: totalBytes };   // 测试钩子
+  /* bug 修复：导出期间暂停了 rAF 循环，结束后必须重启渲染循环，
+     否则画面冻结（此前"导出后粒子消失、需刷新网页"的原因） */
+  animate();
+}
+$('btnExport').addEventListener('click', renderExport);
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+  composer.setSize(innerWidth, innerHeight);
+});
+
+/* 首次打开可直接从命令行读入测试图（可选）：node 起服务后用 ?img= 参数跳过 */
+window.__pcReady = true;
+/* 就绪即撤启动提示（守卫的 200ms 轮询也会撤，这里让最后一帧也不残留） */
+if (window.__pcClearErr) window.__pcClearErr();
+console.log('粒子点云生成器已就绪 — 拖入图片开始');
+</script>
+</body>
+</html>

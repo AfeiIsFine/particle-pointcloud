@@ -1,0 +1,43 @@
+# ---- 操作系统噪音 ----
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---- 构建产物 ----
+# build_share.py 的产出；release/ 例外（见下方 !release/index.html）
+dist/
+dist-web/
+.build_entry.js
+.build_bundle.js
+*.zip
+node_modules/
+
+# ---- 演示视频（几十 MB 的二进制，走 GitHub Releases 而不是 git 历史）----
+release/
+
+# ---- 本地备份副本（工作文件，不进版本库） ----
+*.auto-backup-*
+*~
+
+# ---- 开发期调试截图（约 35 MB，属一次性产物） ----
+# 注意：这些文件留在本机、不影响仓库；需要留存证据时手动 git add -f
+.test/*.png
+repro/
+CODE_REVIEW_*.png
+screenshots-raw/
+
+# ---- 个人部署规划 / 本地脚本（含私人域名与本地路径，不对外）----
+国内备案与主机预算.md
+全球部署与配置依据.md
+部署上线指南.md
+线上版部署说明_*.md
+start.command
+
+# ---- 第三方来源不明的素材（版权风险，代码已不引用）----
+test.jpg
+
+# ---- 编辑器 / 本地环境 ----
+.vscode/
+.idea/
+.env
+.env.*
