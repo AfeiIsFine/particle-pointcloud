@@ -14,6 +14,7 @@ node_modules/
 
 # ---- 演示视频（几十 MB 的二进制，走 GitHub Releases 而不是 git 历史）----
 release/
+.video_backup_not_in_git/
 
 # ---- 本地备份副本（工作文件，不进版本库） ----
 *.auto-backup-*
