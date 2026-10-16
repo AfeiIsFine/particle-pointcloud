@@ -9,6 +9,12 @@
 
 ![演示：彩色抽象 → 粒子聚集成树](screenshots/demo.gif)
 
+▶ **[观看完整演示（32 秒视频）](https://github.com/AfeiIsFine/particle-pointcloud/releases/download/v1.0.0/demo-720p.mp4)**
+
+> 上面是自动播放的 GIF 预览（从 138 秒完整录屏里剪的 4 段高光）；
+> 点上面的链接可以看带完整画面的 32 秒版本，也可以到
+> [Releases 页面](https://github.com/AfeiIsFine/particle-pointcloud/releases/tag/v1.0.0) 下载。
+
 > **关于作者**：本项目作者完全不懂开发，所有代码、功能都是 AI 写的，包括这份说明文档。
 > 如果有低级错误，请见谅 —— 也欢迎直接提 Issue 指出。
 
