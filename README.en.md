@@ -7,13 +7,7 @@ upload — your image is processed entirely in your own browser.
 
 **Live demo**: <https://afeiisfine.mindpion.workers.dev/>
 
-![Demo: colourful abstraction → particles assembling into a tree](screenshots/demo.gif)
-
-▶ **[Watch the full demo (32-second video)](https://github.com/AfeiIsFine/particle-pointcloud/releases/download/v1.0.0/demo-720p.mp4)**
-
-> The GIF above autoplays a preview (4 highlight cuts from a 138-second screen recording);
-> the link opens the full 32-second version, also available on the
-> [Releases page](https://github.com/AfeiIsFine/particle-pointcloud/releases/tag/v1.0.0).
+![Demo: warm particle point cloud → particles assembling into a white tree](screenshots/demo.gif)
 
 > **A note from the author**: I don't know how to program. Every line of code, every feature —
 > and this document — was written by AI. Please forgive any amateurish mistakes, and feel free
