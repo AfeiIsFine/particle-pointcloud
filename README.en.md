@@ -9,9 +9,10 @@ upload — your image is processed entirely in your own browser.
 
 ![Demo: warm particle point cloud → particles assembling into a white tree](screenshots/demo.gif)
 
-> **A note from the author**: I don't know how to program. Every line of code, every feature —
-> and this document — was written by AI. Please forgive any amateurish mistakes, and feel free
-> to open an Issue if you spot one.
+> **A note from the author**: I'm **阿飞这个名字挺好的** (["AfeiIsFine"](https://github.com/AfeiIsFine) —
+> literally "this name Afei is quite nice"). I don't know how to program. Every line of code, every
+> feature — and this document — was written by AI. Please forgive any amateurish mistakes, and feel
+> free to open an Issue if you spot one.
 >
 > **For English readers**: the source code is commented in Chinese. The UI has a built-in
 > Chinese/English switch, but code comments were not translated. This English README is a
