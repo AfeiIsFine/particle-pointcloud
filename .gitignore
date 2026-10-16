@@ -34,6 +34,9 @@ screenshots-raw/
 线上版部署说明_*.md
 start.command
 
+# ---- 内部代码审核报告（按作者要求不公开）----
+CODE_REVIEW_*.md
+
 # ---- 第三方来源不明的素材（版权风险，代码已不引用）----
 test.jpg
 
